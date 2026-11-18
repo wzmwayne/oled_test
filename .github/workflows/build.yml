@@ -58,6 +58,12 @@ jobs:
           restore-keys: |
             ccache-
 
+      - name: Install ccache
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+          ccache -V | head -1
+
       - name: Patch platform.txt for ccache
         run: python3 tools/patch_ccache.py
 
