@@ -18,9 +18,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup arduino-cli
-        uses: arduino/setup-arduino-cli@v1
-        with:
-          version: "1.6.0"
+        run: |
+          curl -fsSL -o /tmp/acli.tar.gz             "https://github.com/arduino/arduino-cli/releases/download/v1.6.0/arduino-cli_1.6.0_Linux_64bit.tar.gz"
+          sudo tar -xzf /tmp/acli.tar.gz -C /usr/local/bin arduino-cli
+          arduino-cli version
 
       - name: Cache core and libraries
         id: cache-core
