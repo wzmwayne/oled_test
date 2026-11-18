@@ -1,0 +1,28 @@
+/*
+ * btconf.h - 蓝牙配置模块
+ *
+ * 单特征 JSON 协议：
+ *   手机 WRITE  {"pin":"483920","action":"setwifi","params":{"ssid":"..","pass":".."}}
+ *   设备 NOTIFY {"ok":true,"action":"setwifi","msg":"已保存"}
+ *
+ * 生命周期：进入蓝牙配置页 -> btBegin()；离开 -> btEnd()
+ * PIN 每次 btBegin/btClearBonds 时重新生成 6 位随机数
+ */
+#pragma once
+#include <stdint.h>
+
+void btBegin();          /* 启动 BLE，生成新 PIN，开始广播 */
+void btEnd();            /* 关闭 BLE 并释放内存（deinit true） */
+void btPoll();           /* 主循环里调用，处理状态变化 */
+bool btIsConnected();
+bool btStarting();           /* 正在初始化，界面显示加载动画 */
+const char *btStateText();   /* "等待连接" / "已连接" / "已停止" */
+const char *btPinText();     /* 当前 6 位 PIN */
+void btClearBonds();         /* 清全部配对 + 重启服务 + 换 PIN */
+uint32_t btPinErrors();      /* PIN 错误次数，用于诊断 */
+
+/* ---- 由主固件（oled_test.ino）提供 ---- */
+extern void appToast(const char *msg, uint32_t ms);
+extern bool appRtcWriteUnix(uint32_t ts);
+extern bool appRtcReadUnix(uint32_t *ts);
+

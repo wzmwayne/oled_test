@@ -1,0 +1,107 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup arduino-cli
+        uses: arduino/setup-arduino-cli@v1
+        with:
+          version: "1.6.0"
+
+      - name: Cache core and libraries
+        id: cache-core
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15/packages
+            ~/Arduino/libraries
+          key: esp32-3.3.10-arduinojson7.4.3-nimble2.5.2-v1
+
+      - name: Install ESP32 core
+        if: steps.cache-core.outputs.cache-hit != 'true'
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.10
+
+      - name: Config fallback
+        if: steps.cache-core.outputs.cache-hit == 'true'
+        run: arduino-cli config init --overwrite
+
+      - name: Install libraries
+        if: steps.cache-core.outputs.cache-hit != 'true'
+        run: |
+          arduino-cli lib install "NimBLE-Arduino@2.5.2"
+          arduino-cli lib install "ArduinoJson@7.4.3"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.sha }}
+          restore-keys: |
+            ccache-
+
+      - name: Patch platform.txt for ccache
+        run: python3 tools/patch_ccache.py
+
+      - name: Compile
+        run: |
+          ccache -z
+          arduino-cli compile -j "$(nproc)" --build-path .build \
+            --build-property "upload.maximum_size=2097152" \
+            --build-property "compiler.cache_cmd=ccache" \
+            --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc" .
+          ccache -s
+
+      - name: Merge font into full image
+        run: |
+          ESTOOL=$(find ~/.arduino15/packages/esp32/tools/esptool_py -type f -name esptool | head -1)
+          echo "esptool: $ESTOOL"
+          "$ESTOOL" --chip esp32c3 merge-bin -o oled-full.bin \
+            --pad-to-size 4MB --flash-mode dio --flash-freq 80m --flash-size 4MB \
+            0x0      .build/oled_test.ino.bootloader.bin \
+            0x8000   .build/oled_test.ino.partitions.bin \
+            0xe000   .build/boot_app0.bin \
+            0x10000  .build/oled_test.ino.bin \
+            0x210000 font.bin
+          ls -lh oled-full.bin .build/oled_test.ino.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            oled-full.bin
+            .build/oled_test.ino.bin
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          tag_name: build-${{ github.run_number }}
+          name: build-${{ github.run_number }}
+          body: |
+            自动构建产物
+            - oled-full.bin : 完整镜像，刷 0x0（含字库）
+            - oled_test.ino.bin : 仅应用，刷 0x10000
+          files: |
+            oled-full.bin
+            .build/oled_test.ino.bin
+
