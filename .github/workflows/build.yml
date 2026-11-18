@@ -12,6 +12,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # ccache 4.x 默认写 ~/.cache/ccache，显式钉到 ~/.ccache 才能和下面的缓存路径对上
+      CCACHE_DIR: /home/runner/.ccache
 
     steps:
       - name: Checkout
