@@ -763,68 +763,178 @@ static void ntpFail(const char *m) {
   gNtpBusy  = false;
 }
 
+static const char *wlName(wl_status_t s) {
+  switch (s) {
+    case WL_IDLE_STATUS:     return "IDLE";
+    case WL_NO_SSID_AVAIL:   return "NO_SSID";
+    case WL_SCAN_COMPLETED:  return "SCAN_DONE";
+    case WL_CONNECTED:       return "CONNECTED";
+    case WL_CONNECT_FAILED:  return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED:    return "DISCONNECTED";
+    default:                 return "UNKNOWN";
+  }
+}
+
+static const char *authName(wifi_auth_mode_t m) {
+  switch (m) {
+    case WIFI_AUTH_OPEN:          return "OPEN";
+    case WIFI_AUTH_WEP:           return "WEP";
+    case WIFI_AUTH_WPA_PSK:       return "WPA-PSK";
+    case WIFI_AUTH_WPA2_PSK:      return "WPA2-PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2";
+    case WIFI_AUTH_ENTERPRISE:    return "WPA2-ENT";
+    case WIFI_AUTH_WPA3_PSK:      return "WPA3-SAE";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+    case WIFI_AUTH_WAPI_PSK:      return "WAPI";
+    case WIFI_AUTH_OWE:           return "OWE";
+    default:                      return "OTHER";
+  }
+}
+
 static void ntpSyncTask(void *arg) {
   char     ssid[40], pass[68], srv[68];
   int      tz = 8;
   uint32_t t0;
   time_t   now;
   int      idx = gSyWifiIdx;
+  bool     success = false;
 
   btCfgGetNtp(srv, sizeof(srv), &tz);
   gTzHour = tz;
 
+  logf("\r\n[NTP] ===== 开始校时 =====\r\n");
+  logf("[NTP] WiFi 索引 %d / 共 %d 条\r\n", idx, btWifiCount());
+  logf("[NTP] 时区 UTC%+d   服务器 %s\r\n", tz, srv);
+
   if (!btWifiGet(idx, ssid, sizeof(ssid), pass, sizeof(pass))) {
+    logf("[NTP] 取 WiFi 配置失败\r\n");
     ntpFail("WiFi 不存在");
     goto done;
   }
+  logf("[NTP] SSID=\"%s\" 密码长度=%u\r\n", ssid, (unsigned)strlen(pass));
 
+  /* ---- 1. 扫描：确认目标 AP 可见并打印其属性 ---- */
+  ntpSetMsg("扫描 WiFi");
+  gNtpPct = 4;
+  logf("[NTP] 扫描中...\r\n");
+  {
+    int found = WiFi.scanNetworks();
+    logf("[NTP] 扫描完成，共 %d 个 AP\r\n", found);
+    bool hit = false;
+    for (int i = 0; i < found; i++) {
+      if (WiFi.SSID(i) == String(ssid)) {
+        logf("[NTP] 命中目标 RSSI=%d dBm 信道=%d 加密=%s\r\n",
+             (int)WiFi.RSSI(i), (int)WiFi.channel(i),
+             authName(WiFi.encryptionType(i)));
+        hit = true;
+      }
+    }
+    if (!hit) logf("[NTP] 警告 扫描列表里没有 \"%s\"（信号弱或隐藏 SSID）\r\n", ssid);
+    WiFi.scanDelete();
+  }
+
+  /* ---- 2. 连接 ---- */
   ntpSetMsg("连接 WiFi");
-  gNtpPct = 8;
-
+  gNtpPct = 10;
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  logf("[NTP] WiFi.begin(\"%s\")\r\n", ssid);
   WiFi.begin(ssid, pass);
 
-  t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) {
-    vTaskDelay(pdMS_TO_TICKS(200));
-    int pct = 8 + (int)((millis() - t0) * 32 / 25000);
-    gNtpPct = pct > 40 ? 40 : pct;
+  {
+    wl_status_t last = WL_IDLE_STATUS;
+    t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) {
+      wl_status_t st = WiFi.status();
+      if (st != last) {
+        logf("[NTP] 状态 %s -> %s  (%u ms)\r\n",
+             wlName(last), wlName(st), (unsigned)(millis() - t0));
+        last = st;
+      }
+      vTaskDelay(pdMS_TO_TICKS(200));
+      int pct = 10 + (int)((millis() - t0) * 30 / 25000);
+      gNtpPct = pct > 40 ? 40 : pct;
+    }
   }
-  if (WiFi.status() != WL_CONNECTED) { ntpFail("WiFi 连接失败"); goto done; }
 
+  if (WiFi.status() != WL_CONNECTED) {
+    logf("[NTP] 连接失败 最终状态=%s\r\n", wlName(WiFi.status()));
+    ntpFail("WiFi 连接失败");
+    goto done;
+  }
+
+  logf("[NTP] 连接成功 耗时 %u ms\r\n", (unsigned)(millis() - t0));
+  logf("[NTP] IP=%s 掩码=%s\r\n",
+       WiFi.localIP().toString().c_str(), WiFi.subnetMask().toString().c_str());
+  logf("[NTP] 网关=%s DNS=%s\r\n",
+       WiFi.gatewayIP().toString().c_str(), WiFi.dnsIP().toString().c_str());
+  logf("[NTP] MAC=%s BSSID=%s RSSI=%d dBm\r\n",
+       WiFi.macAddress().c_str(), WiFi.BSSIDstr().c_str(), (int)WiFi.RSSI());
+
+  /* ---- 3. 请求 NTP ---- */
   ntpSetMsg("等待 NTP");
   gNtpPct = 45;
-
-  /* 偏移传 0 拿真 UTC；转本地由 appRtcWriteUnix 按 gTzHour 完成 */
+  logf("[NTP] configTime(0,0,\"%s\")\r\n", srv);
   configTime(0, 0, srv);
 
-  t0  = millis();
-  now = 0;
-  while (millis() - t0 < 30000) {
-    now = time(nullptr);
-    if (now > 1600000000) break;
-    vTaskDelay(pdMS_TO_TICKS(200));
-    int pct = 45 + (int)((millis() - t0) * 50 / 30000);
-    gNtpPct = pct > 95 ? 95 : pct;
+  {
+    uint32_t t1 = millis();
+    int tries = 0;
+    now = 0;
+    while (millis() - t1 < 30000) {
+      now = time(nullptr);
+      tries++;
+      if (now > 1600000000) break;
+      vTaskDelay(pdMS_TO_TICKS(200));
+      int pct = 45 + (int)((millis() - t1) * 50 / 30000);
+      gNtpPct = pct > 95 ? 95 : pct;
+    }
+    if (now > 1600000000)
+      logf("[NTP] 收到时间 time()=%lu（轮询 %d 次，%u ms）\r\n",
+           (unsigned long)now, tries, (unsigned)(millis() - t1));
+    else
+      logf("[NTP] 超时 30s 内无有效时间，最后一次=%lu\r\n", (unsigned long)now);
   }
 
   if (now <= 1600000000) { ntpFail("NTP 超时"); goto done; }
 
+  {
+    struct tm tu, tl;
+    time_t utc = now;
+    time_t loc = now + (time_t)tz * 3600;
+    gmtime_r(&utc, &tu);
+    gmtime_r(&loc, &tl);
+    logf("[NTP] UTC  %04d-%02d-%02d %02d:%02d:%02d\r\n",
+         tu.tm_year + 1900, tu.tm_mon + 1, tu.tm_mday,
+         tu.tm_hour, tu.tm_min, tu.tm_sec);
+    logf("[NTP] 本地 %04d-%02d-%02d %02d:%02d:%02d (UTC%+d)\r\n",
+         tl.tm_year + 1900, tl.tm_mon + 1, tl.tm_mday,
+         tl.tm_hour, tl.tm_min, tl.tm_sec, tz);
+  }
+
   gNtpPct = 97;
+  ntpSetMsg("写入 RTC");
   if (appRtcWriteUnix((uint32_t)now)) {
-    gNtpState = NTP_OK;
-    gNtpPct   = 100;
-    ntpSetMsg("时间已写入 RTC");
-    logf("[NTP] 成功 utc=%lu tz=%d\r\n", (unsigned long)now, gTzHour);
+    success = true;
+    logf("[NTP] DS3231 写入成功\r\n");
   } else {
+    logf("[NTP] DS3231 写入失败\r\n");
     ntpFail("写 RTC 失败");
   }
 
 done:
+  /* ---- 4. 最后一步：关闭 WiFi ---- */
+  ntpSetMsg("关闭 WiFi");
+  gNtpPct = 98;
+  logf("[NTP] 关闭 WiFi: disconnect(true) + mode(WIFI_OFF)\r\n");
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  logf("[NTP] WiFi 已关闭\r\n");
+
+  if (success) { gNtpState = NTP_OK; gNtpPct = 100; }
+  logf("[NTP] ===== 校时结束 %s =====\r\n\r\n", success ? "成功" : "失败");
   gNtpBusy = false;
   vTaskDelete(NULL);
 }
