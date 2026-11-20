@@ -748,25 +748,12 @@ static volatile int  gNtpPct   = 0;
 static char          gNtpMsg[28] = "";
 static volatile bool gNtpBusy  = false;
 
-#define CFG_NS "cfg"
-
-/* 与 btconf.cpp 的 cfgGet 读同一份 NVS，key 名必须保持一致 */
-static void ntpLoadCfg(char *ssid, size_t sl, char *pass, size_t pl,
-                       char *srv, size_t vl, int *tz) {
-  Preferences p;
-  p.begin(CFG_NS, true);
-  String s = p.getString("ssid", "");
-  String w = p.getString("pass", "");
-  String n = p.getString("ntp", "ntp.aliyun.com");
-  int    z = p.getInt("tz", 8);
-  p.end();
-  if (z < -12 || z > 14) z = 8;
-  snprintf(ssid, sl, "%s", s.c_str());
-  snprintf(pass, pl, "%s", w.c_str());
-  snprintf(srv,  vl, "%s", n.c_str());
-  if (!*srv) snprintf(srv, vl, "ntp.aliyun.com");
-  *tz = z;
-}
+/* 校时页面的内部状态 */
+enum { SY_MENU = 0, SY_TS, SY_PICK, SY_RUN, SY_DONE, SY_FAIL };
+static int gSyPage    = SY_MENU;
+static int gSyMenuSel = 0;        /* 0=当前时钟模块时间  1=开始校时 */
+static int gSyPickSel = 0;        /* WiFi 列表光标 */
+static int gSyWifiIdx = 0;        /* 本次选中的 WiFi 索引 */
 
 static void ntpSetMsg(const char *m) { snprintf(gNtpMsg, sizeof(gNtpMsg), "%s", m); }
 
@@ -781,11 +768,15 @@ static void ntpSyncTask(void *arg) {
   int      tz = 8;
   uint32_t t0;
   time_t   now;
+  int      idx = gSyWifiIdx;
 
-  ntpLoadCfg(ssid, sizeof(ssid), pass, sizeof(pass), srv, sizeof(srv), &tz);
+  btCfgGetNtp(srv, sizeof(srv), &tz);
   gTzHour = tz;
 
-  if (!*ssid) { ntpFail("未配置 WiFi"); goto done; }
+  if (!btWifiGet(idx, ssid, sizeof(ssid), pass, sizeof(pass))) {
+    ntpFail("WiFi 不存在");
+    goto done;
+  }
 
   ntpSetMsg("连接 WiFi");
   gNtpPct = 8;
@@ -843,30 +834,94 @@ static void ntpBegin() {
   gNtpBusy  = true;
   gNtpState = NTP_RUNNING;
   gNtpPct   = 0;
-  ntpSetMsg("启动中");
+  ntpSetMsg("准备连接");
   if (xTaskCreate(ntpSyncTask, "ntp", 6144, nullptr, 2, nullptr) != pdPASS)
     ntpFail("任务创建失败");
 }
 
-static void drawSync() {
-  drawTitleBar("ntp在线时间同步");
-
-  if (gNtpState == NTP_RUNNING) {
-    drawText(2, ROW1 + 4, gNtpMsg);
-    const int ty = 44, th = 6;
-    drawRect(0, ty, SCREEN_W - 1, ty + th - 1);
-    int fill = (SCREEN_W - 2) * gNtpPct / 100;
-    if (fill > 0) fillRect(1, ty + 1, fill, ty + th - 2);
-  } else if (gNtpState == NTP_OK) {
-    drawCenterScaled(ROW1 + 2, "同步成功", 2);
-    drawCenter(ROW2, gNtpMsg);
-    drawCenter(ROW3, "短按*返回");
-  } else if (gNtpState == NTP_FAIL) {
-    drawCenterScaled(ROW1 + 2, "同步失败", 1);
-    drawCenter(ROW2, gNtpMsg);
-    drawCenter(ROW3, "短按*返回");
+/* 菜单项：选中时整行反白 */
+static void drawMenuItem(int y, const char *s, bool sel) {
+  if (sel) {
+    fillRect(0, y, SCREEN_W - 1, y + 14);
+    drawTextMode(2, y, s, 1, false);
   } else {
-    drawCenter(ROW2, "准备中");
+    drawText(2, y, s);
+  }
+}
+
+static void drawSync() {
+  char buf[32];
+
+  /* 后台任务结束时把页面从"进行中"切到结果页 */
+  if (gSyPage == SY_RUN) {
+    if (gNtpState == NTP_OK)        gSyPage = SY_DONE;
+    else if (gNtpState == NTP_FAIL) gSyPage = SY_FAIL;
+  }
+
+  switch (gSyPage) {
+    case SY_MENU:
+      drawTitleBar("ntp在线时间同步");
+      drawMenuItem(ROW1, "当前时钟模块时间", gSyMenuSel == 0);
+      drawMenuItem(ROW2, "开始校时",         gSyMenuSel == 1);
+      drawText(2, ROW3 + 2, "0/1选 #确认 *返回");
+      break;
+
+    case SY_TS: {
+      drawTitleBar("当前时钟模块时间");
+      uint32_t ts = 0;
+      const char *s = appRtcReadUnix(&ts) ? nullptr : "读取失败";
+      if (!s) { snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts); s = buf; }
+      drawCenter(ROW1 + 4, "unix 时间戳");
+      drawCenter(ROW2 + 2, s);
+      drawCenter(ROW3 + 2, "短按*返回");
+      break;
+    }
+
+    case SY_PICK: {
+      drawTitleBar("选择 WiFi");
+      int n = btWifiCount();
+      if (n == 0) {
+        drawCenter(ROW2, "未保存 WiFi");
+        drawCenter(ROW3, "短按*返回");
+      } else {
+        int first = (gSyPickSel >= 3) ? gSyPickSel - 2 : 0;
+        for (int i = 0; i < 3; i++) {
+          int idx = first + i;
+          if (idx >= n) break;
+          char s[40], w[68];
+          btWifiGet(idx, s, sizeof(s), w, sizeof(w));
+          drawMenuItem(ROW1 + i * 16, s, idx == gSyPickSel);
+        }
+        if (first > 0)     fillRect(124, 2, 127, 5);
+        if (first + 3 < n) fillRect(124, 58, 127, 61);
+      }
+      break;
+    }
+
+    case SY_RUN:
+      /* 加载动画：标题带百分比，正文是当前步骤 */
+      snprintf(buf, sizeof(buf), "校时中 %d%%", gNtpPct);
+      drawLoading(buf, gNtpMsg, gAnimTick);
+      break;
+
+    case SY_DONE: {
+      drawTitleBar("ntp在线时间同步");
+      drawCenterScaled(ROW1 + 2, "同步成功", 2);
+      uint32_t ts = 0;
+      if (appRtcReadUnix(&ts)) {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts);
+        drawCenter(ROW2 + 2, buf);
+      }
+      drawCenter(ROW3, "短按*返回");
+      break;
+    }
+
+    case SY_FAIL:
+      drawTitleBar("ntp在线时间同步");
+      drawCenterScaled(ROW1 + 4, "同步失败", 1);
+      drawCenter(ROW2 + 4, gNtpMsg);
+      drawCenter(ROW3, "短按*返回");
+      break;
   }
 }
 
@@ -887,7 +942,10 @@ static void enterApp(int id) {
   gLastActivity = millis();
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
-  if (id == APP_SYNC)   ntpBegin();         /* 进页面立即开始同步 */
+  if (id == APP_SYNC) {                     /* 进页面只重置到菜单，等用户确认 */
+    gSyPage = SY_MENU; gSyMenuSel = 0; gSyPickSel = 0;
+    gNtpState = NTP_IDLE; gNtpBusy = false;
+  }
 }
 
 /* ==================== 按键分发 ==================== */
@@ -988,8 +1046,51 @@ static void handleKeys() {
 
     case APP_SCHEDULE:
     case APP_READER:
-    case APP_SYNC:
       if (starS) goHome();
+      break;
+
+    case APP_SYNC:
+      switch (gSyPage) {
+        case SY_MENU:
+          if (zeroS && gSyMenuSel > 0) gSyMenuSel--;
+          if (oneS  && gSyMenuSel < 1) gSyMenuSel++;
+          if (hashS) {
+            if (gSyMenuSel == 0) {
+              gSyPage = SY_TS;
+            } else if (btWifiCount() > 0) {
+              gSyPickSel = 0;
+              gSyPage    = SY_PICK;
+            } else {
+              appToast("未保存 WiFi", 1500);
+            }
+          }
+          if (starS) goHome();
+          break;
+
+        case SY_TS:
+          if (starS || hashS) gSyPage = SY_MENU;
+          break;
+
+        case SY_PICK: {
+          int n = btWifiCount();
+          if (zeroS && gSyPickSel > 0)     gSyPickSel--;
+          if (oneS  && gSyPickSel < n - 1) gSyPickSel++;
+          if (hashS && n > 0) {
+            gSyWifiIdx = gSyPickSel;
+            gSyPage    = SY_RUN;
+            ntpBegin();
+          }
+          if (starS) gSyPage = SY_MENU;
+          break;
+        }
+
+        case SY_RUN:
+          break;   /* 进行中不响应按键 */
+
+        default:   /* SY_DONE / SY_FAIL */
+          if (starS || hashS) { gSyPage = SY_MENU; gNtpState = NTP_IDLE; }
+          break;
+      }
       break;
 
     case APP_BTCONF:
@@ -1131,10 +1232,10 @@ void setup() {
 
   /* 时区必须在任何 RTC 读写之前载入，否则时间会差一个时区 */
   {
-    char a[40], b[68], c[68]; int z = 8;
-    ntpLoadCfg(a, sizeof(a), b, sizeof(b), c, sizeof(c), &z);
+    char srv[68]; int z = 8;
+    btCfgGetNtp(srv, sizeof(srv), &z);
     gTzHour = z;
-    logf("[配置] 时区 UTC%+d\r\n", gTzHour);
+    logf("[配置] 时区 UTC%+d  NTP=%s WiFi=%d 条\r\n", gTzHour, srv, btWifiCount());
   }
 
   uint8_t st = 0xFF;
