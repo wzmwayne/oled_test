@@ -10,6 +10,7 @@
  */
 #pragma once
 #include <stdint.h>
+#include <stddef.h>   /* size_t */
 
 void btBegin();          /* 启动 BLE，生成新 PIN，开始广播 */
 void btEnd();            /* 关闭 BLE 并释放内存（deinit true） */

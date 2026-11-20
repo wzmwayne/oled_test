@@ -68,7 +68,11 @@
   </div>
   <div class="row">
     <input id="pass" placeholder="WiFi 密码">
-    <button id="qWifi">setwifi</button>
+    <button id="qWifi">添加 WiFi</button>
+  </div>
+  <div class="row" style="flex-wrap:wrap">
+    <button id="qList">列出 WiFi</button>
+    <button id="qDel">删除该 WiFi</button>
   </div>
   <div class="row">
     <input id="ntp" placeholder="NTP 服务器" value="ntp.aliyun.com">
@@ -272,6 +276,13 @@ $('qWifi').onclick = () => {
   const ssid = $('ssid').value.trim(), pass = $('pass').value;
   if (!ssid) { log('先填 WiFi 名称', 'lg-er'); return; }
   send({pin:p, action:'setwifi', params:{ssid, pass}});
+};
+$('qList').onclick = () => { const p = pin(); if (p) send({pin:p, action:'listwifi'}); };
+$('qDel').onclick  = () => {
+  const p = pin(); if (!p) return;
+  const ssid = $('ssid').value.trim();
+  if (!ssid) { log('先在 WiFi 名称里填要删的那个', 'lg-er'); return; }
+  send({pin:p, action:'delwifi', params:{ssid}});
 };
 $('qNtp').onclick = () => {
   const p = pin(); if (!p) return;
