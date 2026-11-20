@@ -205,9 +205,12 @@ static void btStartTask(void *arg) {
   NimBLEDevice::init(BT_DEV_NAME);
   appLog("[BT] init 完成\r\n");
   NimBLEDevice::setMTU(517);
-  NimBLEDevice::setSecurityAuth(true, true, false);   /* bonding, mitm, 不强制 SC */
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
-  NimBLEDevice::setSecurityPasskey((uint32_t)atoi(gPin));
+  /* 不要求连接加密/绑定：手机连上即可直接读写，不弹系统配对框。
+   * 安全性由应用层 JSON 里的 pin 字段承担（6 位随机，错 3 次断开服务）。
+   * 之前 setSecurityAuth(true,true,false) 强制 bonding+MITM，导致每次
+   * 换固件后手机与设备的绑定表对不上，连接报 "Error occurred trying
+   * to connect to remote device"。 */
+  NimBLEDevice::setSecurityAuth(false, false, false);
 
   gServer = NimBLEDevice::createServer();
   gServer->setCallbacks(new ServerCb());

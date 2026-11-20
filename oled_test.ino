@@ -24,6 +24,8 @@
 #include "src/font_wqy14.h"
 #include "src/btconf.h"
 #include <time.h>
+#include <WiFi.h>
+#include <Preferences.h>
 
 #define OLED_SDA 6
 #define OLED_SCL 7
@@ -40,6 +42,11 @@ enum { KEY_STAR = 0, KEY_0 = 1, KEY_1 = 2, KEY_HASH = 3 };
 #define ROW1 16
 #define ROW2 32
 #define ROW3 48
+
+/* 时区（小时）。RTC 硬件里存的是本地时间，对外的 Unix 接口一律 UTC：
+ * 写 RTC 时 +gTzHour，读 RTC 时 -gTzHour。这样显示端直接读 RTC 就是
+ * 本地时刻，而 BLE 的 settime/gettime 仍保持标准 UTC 语义。 */
+static int gTzHour = 8;
 #define I2C_CHUNK 64
 
 #define LONG_MS       700
@@ -367,7 +374,8 @@ static bool dsReadTime(RtcTime &t);
 static bool dsReadTimeFwd(RtcTime &t);
 
 bool appRtcWriteUnix(uint32_t ts) {
-  time_t tt = (time_t)ts;
+  /* 入参是 UTC 秒；RTC 存本地时间，所以先加上时区偏移 */
+  time_t tt = (time_t)((int32_t)ts + (int32_t)gTzHour * 3600);
   struct tm tmv;
   gmtime_r(&tt, &tmv);
   RtcTime rt;
@@ -395,10 +403,14 @@ bool appRtcReadUnix(uint32_t *ts) {
   RtcTime t;
   if (!dsReadTimeFwd(t)) return false;
   int32_t days = daysFromEpoch(t.year, t.month, t.day);
-  *ts = (uint32_t)days * 86400UL
-      + (uint32_t)t.hour * 3600UL
-      + (uint32_t)t.minute * 60UL
-      + (uint32_t)t.second;
+  /* RTC 里是本地时间，减掉时区偏移还原成 UTC 秒 */
+  int64_t local = (int64_t)days * 86400
+                + (int64_t)t.hour * 3600
+                + (int64_t)t.minute * 60
+                + (int64_t)t.second;
+  int64_t utc = local - (int64_t)gTzHour * 3600;
+  if (utc < 0) utc = 0;
+  *ts = (uint32_t)utc;
   return true;
 }
 
@@ -729,6 +741,135 @@ static void drawToast() {
   drawTextMode(x > 0 ? x : 0, ROW3, gToast, 1, false);
 }
 
+/* ==================== NTP 在线同步 ==================== */
+enum { NTP_IDLE = 0, NTP_RUNNING, NTP_OK, NTP_FAIL };
+static volatile int  gNtpState = NTP_IDLE;
+static volatile int  gNtpPct   = 0;
+static char          gNtpMsg[28] = "";
+static volatile bool gNtpBusy  = false;
+
+#define CFG_NS "cfg"
+
+/* 与 btconf.cpp 的 cfgGet 读同一份 NVS，key 名必须保持一致 */
+static void ntpLoadCfg(char *ssid, size_t sl, char *pass, size_t pl,
+                       char *srv, size_t vl, int *tz) {
+  Preferences p;
+  p.begin(CFG_NS, true);
+  String s = p.getString("ssid", "");
+  String w = p.getString("pass", "");
+  String n = p.getString("ntp", "ntp.aliyun.com");
+  int    z = p.getInt("tz", 8);
+  p.end();
+  if (z < -12 || z > 14) z = 8;
+  snprintf(ssid, sl, "%s", s.c_str());
+  snprintf(pass, pl, "%s", w.c_str());
+  snprintf(srv,  vl, "%s", n.c_str());
+  if (!*srv) snprintf(srv, vl, "ntp.aliyun.com");
+  *tz = z;
+}
+
+static void ntpSetMsg(const char *m) { snprintf(gNtpMsg, sizeof(gNtpMsg), "%s", m); }
+
+static void ntpFail(const char *m) {
+  ntpSetMsg(m);
+  gNtpState = NTP_FAIL;
+  gNtpBusy  = false;
+}
+
+static void ntpSyncTask(void *arg) {
+  char     ssid[40], pass[68], srv[68];
+  int      tz = 8;
+  uint32_t t0;
+  time_t   now;
+
+  ntpLoadCfg(ssid, sizeof(ssid), pass, sizeof(pass), srv, sizeof(srv), &tz);
+  gTzHour = tz;
+
+  if (!*ssid) { ntpFail("未配置 WiFi"); goto done; }
+
+  ntpSetMsg("连接 WiFi");
+  gNtpPct = 8;
+
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(ssid, pass);
+
+  t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+    int pct = 8 + (int)((millis() - t0) * 32 / 25000);
+    gNtpPct = pct > 40 ? 40 : pct;
+  }
+  if (WiFi.status() != WL_CONNECTED) { ntpFail("WiFi 连接失败"); goto done; }
+
+  ntpSetMsg("等待 NTP");
+  gNtpPct = 45;
+
+  /* 偏移传 0 拿真 UTC；转本地由 appRtcWriteUnix 按 gTzHour 完成 */
+  configTime(0, 0, srv);
+
+  t0  = millis();
+  now = 0;
+  while (millis() - t0 < 30000) {
+    now = time(nullptr);
+    if (now > 1600000000) break;
+    vTaskDelay(pdMS_TO_TICKS(200));
+    int pct = 45 + (int)((millis() - t0) * 50 / 30000);
+    gNtpPct = pct > 95 ? 95 : pct;
+  }
+
+  if (now <= 1600000000) { ntpFail("NTP 超时"); goto done; }
+
+  gNtpPct = 97;
+  if (appRtcWriteUnix((uint32_t)now)) {
+    gNtpState = NTP_OK;
+    gNtpPct   = 100;
+    ntpSetMsg("时间已写入 RTC");
+    logf("[NTP] 成功 utc=%lu tz=%d\r\n", (unsigned long)now, gTzHour);
+  } else {
+    ntpFail("写 RTC 失败");
+  }
+
+done:
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  gNtpBusy = false;
+  vTaskDelete(NULL);
+}
+
+static void ntpBegin() {
+  if (gNtpBusy) return;
+  gNtpBusy  = true;
+  gNtpState = NTP_RUNNING;
+  gNtpPct   = 0;
+  ntpSetMsg("启动中");
+  if (xTaskCreate(ntpSyncTask, "ntp", 6144, nullptr, 2, nullptr) != pdPASS)
+    ntpFail("任务创建失败");
+}
+
+static void drawSync() {
+  drawTitleBar("ntp在线时间同步");
+
+  if (gNtpState == NTP_RUNNING) {
+    drawText(2, ROW1 + 4, gNtpMsg);
+    const int ty = 44, th = 6;
+    drawRect(0, ty, SCREEN_W - 1, ty + th - 1);
+    int fill = (SCREEN_W - 2) * gNtpPct / 100;
+    if (fill > 0) fillRect(1, ty + 1, fill, ty + th - 2);
+  } else if (gNtpState == NTP_OK) {
+    drawCenterScaled(ROW1 + 2, "同步成功", 2);
+    drawCenter(ROW2, gNtpMsg);
+    drawCenter(ROW3, "短按*返回");
+  } else if (gNtpState == NTP_FAIL) {
+    drawCenterScaled(ROW1 + 2, "同步失败", 1);
+    drawCenter(ROW2, gNtpMsg);
+    drawCenter(ROW3, "短按*返回");
+  } else {
+    drawCenter(ROW2, "准备中");
+  }
+}
+
 /* ==================== 导航 ==================== */
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
@@ -746,6 +887,7 @@ static void enterApp(int id) {
   gLastActivity = millis();
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
+  if (id == APP_SYNC)   ntpBegin();         /* 进页面立即开始同步 */
 }
 
 /* ==================== 按键分发 ==================== */
@@ -987,6 +1129,14 @@ void setup() {
 
   fontMount();          /* 字库从 font 分区 mmap，失败的话屏幕会显示方块 */
 
+  /* 时区必须在任何 RTC 读写之前载入，否则时间会差一个时区 */
+  {
+    char a[40], b[68], c[68]; int z = 8;
+    ntpLoadCfg(a, sizeof(a), b, sizeof(b), c, sizeof(c), &z);
+    gTzHour = z;
+    logf("[配置] 时区 UTC%+d\r\n", gTzHour);
+  }
+
   uint8_t st = 0xFF;
   gRtcOk = dsReadRaw(0x0F, &st, 1);
   if (gRtcOk) {
@@ -1065,6 +1215,7 @@ void loop() {
     uint32_t interval = 120;
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
+    if (gScr == SCR_APP && gApp == APP_SYNC)   interval = 60;   /* 同步进度 16fps */
     if (now - lastDraw >= interval) {
       lastDraw = now;
       clearBuf();
@@ -1079,7 +1230,7 @@ void loop() {
           case APP_SCHEDULE:  drawSchedule(); break;
           case APP_READER:    drawStub("阅读器"); break;
           case APP_BTCONF:    drawBtConf(); break;
-          case APP_SYNC:      drawStub("ntp在线时间同步"); break;
+          case APP_SYNC:      drawSync(); break;
         }
       }
       drawToast();
