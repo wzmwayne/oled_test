@@ -224,13 +224,22 @@ static void btStartTask(void *arg) {
 
   appLog("[BT] service 已启动\r\n");
 
-  /* 广播包只有 31 字节：flags(3) + 128位UUID(18) 已占 21，
-   * 名字还要 12 字节，合计 33 字节溢出 2 字节 ——
-   * 实测结果就是手机把设备名解析成乱码。
-   * 所以广播包只放名字；服务 UUID 等连接后由 GATT 发现。 */
+  /* 广播包只有 31 字节，128 位 UUID 占 18，名字 12，合计 33 —— 溢出。
+   * 拆开：广播包放名字（15 字节），扫描响应放 UUID（18 字节），互不挤压。
+   *
+   * 顺序很关键：NimBLEAdvertising::setName() 在扫描响应开启时会把名字
+   * 写进 m_scanData 而不是 m_advData。之前先 setName 再关扫描响应，
+   * 名字就随扫描响应一起被丢弃，手机只能看到 MAC、看不到设备名。
+   * 所以必须：先关扫描响应 -> 设名字（落入广播包）-> 再单独配扫描响应。 */
   NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
+  adv->enableScanResponse(false);        /* 关键：让 setName 走 m_advData */
   adv->setName(BT_DEV_NAME);
-  adv->enableScanResponse(false);
+
+  NimBLEAdvertisementData scanData;
+  scanData.addServiceUUID(NimBLEUUID(BT_SVC_UUID));
+  adv->setScanResponseData(scanData);
+  adv->enableScanResponse(true);
+
   adv->setMinInterval(32);      /* 20ms，扫描更容易命中 */
   adv->setMaxInterval(48);      /* 30ms */
   bool started = adv->start();
