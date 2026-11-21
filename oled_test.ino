@@ -94,8 +94,25 @@ struct RtcTime {
 enum WakeSource { WAKE_KEY = 0, WAKE_TIMER_DONE, WAKE_RTC_ALARM, WAKE_SQW, WAKE_EXT };
 static const char *WAKE_NAME[] = {"按键", "倒计时到点", "RTC闹钟", "SQW引脚", "外部"};
 
-/* ==================== 日志（非阻塞） ==================== */
+/* ==================== 日志 ====================
+ * 原来「缓冲不够就整行丢掉」：扫描 20 个 AP 只打出 5 行，诊断信息也会被吞。
+ * 改成先等最多 50ms 让缓冲排空，仍然没有位置才放弃这一路。 */
 static void toast(const char *m, uint32_t ms);
+
+static void logWrite(const char *buf, size_t len) {
+  if (Serial) {
+    uint32_t t0 = millis();
+    while (Serial.availableForWrite() < (int)len && millis() - t0 < 50) delay(1);
+    if (Serial.availableForWrite() >= (int)len)
+      Serial.write((const uint8_t *)buf, len);
+  }
+  {
+    uint32_t t0 = millis();
+    while (Serial0.availableForWrite() < (int)len && millis() - t0 < 50) delay(1);
+    if (Serial0.availableForWrite() >= (int)len)
+      Serial0.write((const uint8_t *)buf, len);
+  }
+}
 
 static void logf(const char *fmt, ...) {
   char buf[288];
@@ -105,10 +122,7 @@ static void logf(const char *fmt, ...) {
   va_end(ap);
   if (n <= 0) return;
   size_t len = ((size_t)n < sizeof(buf)) ? (size_t)n : sizeof(buf) - 1;
-  if (Serial && Serial.availableForWrite() >= (int)len)
-    Serial.write((const uint8_t *)buf, len);
-  if (Serial0.availableForWrite() >= (int)len)
-    Serial0.write((const uint8_t *)buf, len);
+  logWrite(buf, len);
 }
 
 /* ==================== 供 btconf.cpp 调用 ==================== */
@@ -120,10 +134,7 @@ void appLog(const char *fmt, ...) {
   va_end(ap);
   if (n <= 0) return;
   size_t len = ((size_t)n < sizeof(buf)) ? (size_t)n : sizeof(buf) - 1;
-  if (Serial && Serial.availableForWrite() >= (int)len)
-    Serial.write((const uint8_t *)buf, len);
-  if (Serial0.availableForWrite() >= (int)len)
-    Serial0.write((const uint8_t *)buf, len);
+  logWrite(buf, len);
 }
 void appToast(const char *msg, uint32_t ms) { toast(msg, ms); }
 
