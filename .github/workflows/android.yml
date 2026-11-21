@@ -1,11 +1,7 @@
 name: android
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'android/**'
-      - '.github/workflows/android.yml'
+  # 仅手动触发：Actions 页面 "Run workflow"，或 gh workflow run android
   workflow_dispatch:
 
 permissions:

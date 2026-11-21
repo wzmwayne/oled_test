@@ -1,8 +1,7 @@
 name: build
 
 on:
-  push:
-    branches: [main]
+  # 仅手动触发：Actions 页面 "Run workflow"，或 gh workflow run build
   workflow_dispatch:
 
 permissions:
