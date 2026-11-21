@@ -645,11 +645,18 @@ static void hhmm(char *buf, size_t n, uint16_t min) {
   snprintf(buf, n, "%u:%02u", (unsigned)(min / 60), (unsigned)(min % 60));
 }
 
+/* 还有多久：2小时15分 / 45分 / 不到1分 */
+static void durText(char *buf, size_t n, int min) {
+  if (min <= 0)      snprintf(buf, n, "不到1分");
+  else if (min < 60) snprintf(buf, n, "%d分", min);
+  else               snprintf(buf, n, "%d小时%d分", min / 60, min % 60);
+}
+
 /* 主页第 4 行：正在上的课 → 下节课 → 已放学 → 今日无课 */
 static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
-  char line[64], t1[8], t2[8];
+  char line[64], t1[8], t2[8], d1[16];
   int  today  = weekdayFromDate(gNow.year, gNow.month, gNow.day) + 1;  /* 0=周日 -> 7 */
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
   int  endMin = 0;
@@ -661,21 +668,16 @@ static void drawHomeSchedule() {
   if (cur >= 0) {
     const TtCourse *c = ttGet(cur);
     if (hasEnd) {
-      hhmm(t2, sizeof(t2), (uint16_t)endMin);
-      snprintf(line, sizeof(line), "正在上 %s 剩%d分 · %s放学", c->name, (int)c->end - nowMin, t2);
+      durText(d1, sizeof(d1), endMin - nowMin);
+      snprintf(line, sizeof(line), "正在上 %s 剩%d分 · 放学还有%s", c->name, (int)c->end - nowMin, d1);
     } else {
       snprintf(line, sizeof(line), "正在上 %s 剩%d分", c->name, (int)c->end - nowMin);
     }
   } else if (nxt >= 0) {
     const TtCourse *c = ttGet(nxt);
     hhmm(t1, sizeof(t1), c->start);
-    if (hasEnd) {
-      hhmm(t2, sizeof(t2), (uint16_t)endMin);
-      snprintf(line, sizeof(line), "下节 %s %s · 还有%d分 · %s放学", c->name, t1,
-               (int)c->start - nowMin, t2);
-    } else {
-      snprintf(line, sizeof(line), "下节 %s %s · 还有%d分", c->name, t1, (int)c->start - nowMin);
-    }
+    durText(d1, sizeof(d1), (int)c->start - nowMin);
+    snprintf(line, sizeof(line), "下节 %s %s · 还有%s", c->name, t1, d1);
   } else if (hasEnd) {
     hhmm(t2, sizeof(t2), (uint16_t)endMin);
     snprintf(line, sizeof(line), "今日课已结束 · %s放学", t2);
