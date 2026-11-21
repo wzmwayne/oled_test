@@ -323,7 +323,7 @@ static void cmdConn(char *arg) {
   WiFi.disconnect();
   delay(100);
 
-  if (!gEvBound) {
+  if (!gEvtBound) {
     esp_err_t e = bindEvents();
     appLog("[wifi] 事件绑定重试: %s\r\n", e == ESP_OK ? "成功" : esp_err_to_name(e));
   }
