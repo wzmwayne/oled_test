@@ -1409,6 +1409,7 @@ static void handleCmd(char *cmd) {
     logf("WiFi 调试（USB 串口，不占用 GPIO）\r\n");
     logf("  wifi                             子命令帮助\r\n");
     logf("  wifi on | off                    开 / 关射频\r\n");
+    logf("  wifi reset                       射频卡住时复位\r\n");
     logf("  wifi status                      状态/IP/信号/最近断开原因\r\n");
     logf("  wifi scan                        扫描周边 AP\r\n");
     logf("  wifi list                        已保存的 WiFi\r\n");

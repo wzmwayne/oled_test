@@ -52,6 +52,7 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 |---|---|
 | `wifi` | 子命令帮助 |
 | `wifi on` / `wifi off` | 开 / 关射频 |
+| `wifi reset` | 射频卡住时复位（关 → 开 STA） |
 | `wifi status` | 模式、状态、IP、信号、**最近一次断开原因 + 中文诊断** |
 | `wifi scan` | 扫描周边 AP，标出已保存的那几个 |
 | `wifi list` | 列出已保存的 WiFi |

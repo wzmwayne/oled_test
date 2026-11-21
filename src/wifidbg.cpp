@@ -54,18 +54,47 @@ static volatile uint8_t gReason   = 0;
 static volatile bool    gReasonOk = false;
 static volatile bool    gBusy     = false;
 
+/* 事件计数：连不上时靠它判断「根本没启动」还是「启动了但被拒」 */
+static volatile uint32_t gEvStart = 0, gEvConnected = 0, gEvDisconnected = 0, gEvGotIp = 0;
+
 /* ==================== 事件：记下断开原因 ==================== */
 static void onWifiEvent(void *arg, esp_event_base_t base, int32_t id, void *data) {
   (void)arg;
-  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-    const wifi_event_sta_disconnected_t *e = (const wifi_event_sta_disconnected_t *)data;
-    gReason   = e->reason;
-    gReasonOk = true;
+  if (base != WIFI_EVENT && base != IP_EVENT) return;
+  if (base == WIFI_EVENT) {
+    switch (id) {
+      case WIFI_EVENT_STA_START:
+        gEvStart++;
+        break;
+      case WIFI_EVENT_STA_CONNECTED:
+        gEvConnected++;
+        break;
+      case WIFI_EVENT_STA_DISCONNECTED: {
+        const wifi_event_sta_disconnected_t *e = (const wifi_event_sta_disconnected_t *)data;
+        gReason   = e->reason;
+        gReasonOk = true;
+        gEvDisconnected++;
+        break;
+      }
+      default: break;
+    }
+  } else if (id == IP_EVENT_STA_GOT_IP) {
+    gEvGotIp++;
   }
 }
 
+static esp_err_t gEvtRegErr = ESP_FAIL;
+
 void wifiDbgBegin() {
-  esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, onWifiEvent, NULL);
+  /* 四个事件都收：能看出卡在「未启动 / 已启动未关联 / 关联被拒 / 拿到 IP」哪一步 */
+  gEvtRegErr = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, NULL);
+  esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, NULL);
+  appLog("[wifi] 事件处理器注册: %s\r\n", gEvtRegErr == ESP_OK ? "OK" : esp_err_to_name(gEvtRegErr));
+}
+
+static void printEventStats() {
+  appLog("[wifi] 事件: START=%u CONNECTED=%u DISCONNECTED=%u GOT_IP=%u\r\n",
+         (unsigned)gEvStart, (unsigned)gEvConnected, (unsigned)gEvDisconnected, (unsigned)gEvGotIp);
 }
 
 /* 内置公共 DNS：阿里 223.5.5.5 优先，114 兜底。
@@ -223,12 +252,20 @@ static void cmdList() {
 static void cmdConn(char *arg) {
   if (!arg || !*arg) { appLog("[wifi] 用法: wifi conn <序号|SSID> [密码]\r\n"); return; }
 
+  /* 只拿第一个 token 判断是不是序号。之前扫了整串，于是
+   * "0 cooltel123!" 会被当成 SSID "0" —— 这是上一版 connect 失败的真正原因之一。 */
+  char first[64] = {0};
+  size_t fi = 0;
+  for (const char *p = arg; *p && *p != ' ' && fi < sizeof(first) - 1; p++) first[fi++] = *p;
+  first[fi] = 0;
+
   char ssid[40] = {0}, pass[68] = {0};
-  bool isNum = true;
-  for (char *p = arg; *p; p++) if (*p < '0' || *p > '9') { isNum = false; break; }
+  bool isNum = (fi > 0);
+  for (char *p = first; *p; p++)
+    if (*p < '0' || *p > '9') { isNum = false; break; }
 
   if (isNum) {
-    int idx = atoi(arg);
+    int idx = atoi(first);
     if (!btWifiGet(idx, ssid, sizeof(ssid), pass, sizeof(pass))) {
       appLog("[wifi] 序号 %d 无效（已存 %d 条）\r\n", idx, btWifiCount());
       return;
@@ -244,11 +281,19 @@ static void cmdConn(char *arg) {
 
   /* 先扫一眼，把「AP 在不在、信号多少、什么加密」讲清楚 */
   if (WiFi.getMode() != WIFI_MODE_STA) WiFi.mode(WIFI_STA);
+  /* 上一次没走完的连接会让 scan 直接返回 -2（WIFI_SCAN_FAILED），先断开再扫 */
+  WiFi.disconnect(false);
+  delay(150);
   appLog("[wifi] 预扫描，确认目标 AP 可见…\r\n");
   int n = WiFi.scanNetworks(false, true, false, 300);
+  if (n < 0) {
+    appLog("[wifi] 预扫描返回 %d，等 400ms 重试一次\r\n", n);
+    delay(400);
+    n = WiFi.scanNetworks(false, true, false, 300);
+  }
   bool found = false;
   if (n < 0) {
-    appLog("[wifi] 预扫描失败 (%d)，继续直接连接\r\n", n);
+    appLog("[wifi] 预扫描仍失败 (%d)：射频可能卡住了，建议先 wifi reset\r\n", n);
   } else {
     for (int i = 0; i < n; i++) {
       if (WiFi.SSID(i) == ssid) {
@@ -268,9 +313,21 @@ static void cmdConn(char *arg) {
   delay(100);
 
   gReasonOk = false;
+  gEvStart = gEvConnected = gEvDisconnected = gEvGotIp = 0;
   appLog("[wifi] WiFi.begin(\"%s\") …\r\n", ssid);
   uint32_t t0 = millis();
-  WiFi.begin(ssid, pass);
+  bool began = WiFi.begin(ssid, pass);
+  appLog("[wifi] begin()=%s  模式=%d  状态=%s(%d)\r\n",
+         began ? "true" : "false", (int)WiFi.getMode(),
+         statusName(WiFi.status()), (int)WiFi.status());
+  if (!began) {
+    /* Arduino 把真正的失败原因打在 log_e 里，而 CORE_DEBUG_LEVEL=0 时全被吞掉，
+     * 所以这里直接把内部状态倒出来，并让用户复位射频 */
+    appLog("[wifi] begin() 直接返回 false：WiFi 栈没起来，不是密码问题\r\n");
+    WiFi.printDiag(Serial);
+    appLog("[wifi] 处理：先执行 wifi reset，再 wifi conn 重试\r\n");
+    return;
+  }
 
   wl_status_t last = WL_IDLE_STATUS;
   uint32_t lastPrint = 0;
@@ -304,14 +361,33 @@ static void cmdConn(char *arg) {
 
   appLog("[wifi] 连接失败，耗时 %u ms，最终状态=%s(%d)\r\n", (unsigned)el,
          statusName(WiFi.status()), (int)WiFi.status());
-  if (gReasonOk) {
+  printEventStats();
+  if (gEvStart == 0) {
+    appLog("[wifi] 一个 STA_START 都没有：射频/网卡没启动，和密码、SSID 无关\r\n");
+    appLog("[wifi] 处理：wifi reset 复位后再试；仍不行就怀疑与 BLE 共存时的射频冲突\r\n");
+  } else if (!gReasonOk) {
+    appLog("[wifi] 有 STA_START 但没有断开事件：多半还卡在扫描/关联阶段\r\n");
+    appLog("[wifi] 检查：SSID 是否 2.4GHz、信号是否够（< -85 基本连不上）\r\n");
+  } else {
     appLog("[wifi] 断开原因: %u (%s)\r\n", (unsigned)gReason,
            WiFi.disconnectReasonName((wifi_err_reason_t)gReason));
     appLog("[wifi] 诊断    : %s\r\n", reasonHint(gReason));
-  } else {
-    appLog("[wifi] 没收到断开事件：多半是超时了还没走到认证阶段\r\n");
-    appLog("[wifi] 检查    : SSID 是否 2.4GHz、密码长度是否对、AP 有没有开 MAC 过滤\r\n");
   }
+}
+
+/* 射频复位：驱动卡死时先来一发，再重连 */
+static void cmdReset() {
+  appLog("[wifi] 复位射频：disconnect(true) -> mode(OFF) -> 500ms -> mode(STA)\r\n");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(500);
+  bool ok = WiFi.mode(WIFI_STA);
+  delay(300);
+  gReasonOk = false;
+  appLog("[wifi] mode(STA) %s，当前模式=%d 状态=%s(%d)\r\n", ok ? "成功" : "失败",
+         (int)WiFi.getMode(), statusName(WiFi.status()), (int)WiFi.status());
+  printEventStats();
+  appLog("[wifi] 现在可以 wifi scan / wifi conn 重试\r\n");
 }
 
 /* ---- DNS ---- */
@@ -635,6 +711,7 @@ void wifiDbgHelp() {
   appLog("\r\nWiFi 调试命令：\r\n"
          "  wifi on                       打开 STA（不连接）\r\n"
          "  wifi off                      关闭射频\r\n"
+         "  wifi reset                    射频卡住时复位（关->开 STA）\r\n"
          "  wifi status                   模式/状态/IP/信号/最近断开原因\r\n"
          "  wifi scan                     扫描周边 AP（* 表示已保存）\r\n"
          "  wifi list                     列出已保存的 WiFi\r\n"
@@ -655,6 +732,7 @@ static void dispatch(char *line) {
   if (!*line || !strcasecmp(line, "help")) wifiDbgHelp();
   else if (!strcasecmp(line, "on"))     cmdOn();
   else if (!strcasecmp(line, "off"))    cmdOff();
+  else if (!strcasecmp(line, "reset"))  cmdReset();
   else if (!strcasecmp(line, "status")) cmdStatus();
   else if (!strcasecmp(line, "scan"))   cmdScan();
   else if (!strcasecmp(line, "list"))   cmdList();
