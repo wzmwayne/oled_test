@@ -83,13 +83,24 @@ static void onWifiEvent(void *arg, esp_event_base_t base, int32_t id, void *data
   }
 }
 
-static esp_err_t gEvtRegErr = ESP_FAIL;
+static bool gEvtBound = false;
+
+/* setup() 阶段默认事件循环还没建好，直接注册会拿到 ESP_ERR_INVALID_STATE，
+ * 于是所有计数恒为 0 —— 上一版就是这样被我误读成「驱动没动作」。
+ * 这里先补建事件循环；仍失败就留到第一次 wifi conn 时再绑（那时 WiFi 已初始化）。 */
+static esp_err_t bindEvents() {
+  if (gEvtBound) return ESP_OK;
+  esp_event_loop_create_default();   /* 已存在会返回 INVALID_STATE，忽略 */
+  esp_err_t e1 = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, NULL);
+  esp_err_t e2 = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, NULL);
+  gEvtBound = (e1 == ESP_OK);
+  return gEvtBound ? ESP_OK : e1;
+}
 
 void wifiDbgBegin() {
-  /* 四个事件都收：能看出卡在「未启动 / 已启动未关联 / 关联被拒 / 拿到 IP」哪一步 */
-  gEvtRegErr = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, NULL);
-  esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onWifiEvent, NULL);
-  appLog("[wifi] 事件处理器注册: %s\r\n", gEvtRegErr == ESP_OK ? "OK" : esp_err_to_name(gEvtRegErr));
+  esp_err_t e = bindEvents();
+  appLog("[wifi] 事件绑定: %s（失败会在首次 conn 时重试）\r\n",
+         e == ESP_OK ? "OK" : esp_err_to_name(e));
 }
 
 static void printEventStats() {
@@ -311,6 +322,11 @@ static void cmdConn(char *arg) {
   WiFi.setSleep(false);
   WiFi.disconnect();
   delay(100);
+
+  if (!gEvBound) {
+    esp_err_t e = bindEvents();
+    appLog("[wifi] 事件绑定重试: %s\r\n", e == ESP_OK ? "成功" : esp_err_to_name(e));
+  }
 
   gReasonOk = false;
   gEvStart = gEvConnected = gEvDisconnected = gEvGotIp = 0;
