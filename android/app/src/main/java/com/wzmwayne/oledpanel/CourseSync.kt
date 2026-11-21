@@ -1,0 +1,96 @@
+package com.wzmwayne.oledpanel
+
+import org.json.JSONArray
+import org.json.JSONObject
+
+/** 课表的读取与整体覆盖推送，两个界面共用 */
+object CourseSync {
+
+    fun load(pin: String, done: (List<Course>?, String?) -> Unit) {
+        fetch(pin, 0, ArrayList(), 0, done)
+    }
+
+    private fun fetch(
+        pin: String,
+        from: Int,
+        acc: MutableList<Course>,
+        guard: Int,
+        done: (List<Course>?, String?) -> Unit
+    ) {
+        if (guard > 40) {
+            done(acc, null)
+            return
+        }
+        val params = JSONObject().put("from", from).put("count", 4)
+        BleManager.send(pin, "listtt", params) { res, _ ->
+            if (res?.ok != true) {
+                done(null, res?.msg ?: "设备无响应")
+                return@send
+            }
+            val p = res.params ?: JSONObject()
+            val total = p.optInt("total", 0)
+            val arr = p.optJSONArray("courses") ?: JSONArray()
+            var added = 0
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                acc.add(
+                    Course(
+                        acc.size,
+                        o.optString("name", ""),
+                        o.optInt("day", 1),
+                        o.optInt("start", 0),
+                        o.optInt("end", 0),
+                        o.optInt("parity", 0)
+                    )
+                )
+                added++
+            }
+            if (added == 0 || acc.size >= total) done(acc, null)
+            else fetch(pin, from + added, acc, guard + 1, done)
+        }
+    }
+
+    /** 先 cleartt 再逐条 addcourse，等于整张表覆盖 */
+    fun push(
+        pin: String,
+        list: List<Course>,
+        onProgress: (Int, Int) -> Unit,
+        done: (Boolean, String?) -> Unit
+    ) {
+        BleManager.send(pin, "cleartt") { res, _ ->
+            if (res?.ok != true) {
+                done(false, "清空失败：" + (res?.msg ?: "无响应"))
+                return@send
+            }
+            pushAt(pin, list, 0, onProgress, done)
+        }
+    }
+
+    private fun pushAt(
+        pin: String,
+        list: List<Course>,
+        i: Int,
+        onProgress: (Int, Int) -> Unit,
+        done: (Boolean, String?) -> Unit
+    ) {
+        if (i >= list.size) {
+            done(true, null)
+            return
+        }
+        val c = list[i]
+        val params = JSONObject()
+            .put("name", c.name)
+            .put("day", c.day)
+            .put("start", c.start)
+            .put("end", c.end)
+            .put("parity", c.parity)
+        BleManager.send(pin, "addcourse", params) { res, _ ->
+            if (res?.ok != true) {
+                done(false, "第 " + (i + 1) + " 门失败：" + (res?.msg ?: "无响应"))
+                return@send
+            }
+            onProgress(i + 1, list.size)
+            pushAt(pin, list, i + 1, onProgress, done)
+        }
+    }
+}

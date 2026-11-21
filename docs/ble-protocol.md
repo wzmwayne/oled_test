@@ -41,6 +41,7 @@
 | `settime` | `ts`（UTC 秒） | — |
 | `gettime` | — | `ts`（UTC 秒） |
 | `unpair` | — | —（清配对并重启服务，连接会断） |
+| `fsstat` | — | `total` `used` `free`（LittleFS 字节）`heap` |
 | `blist` | — | `count` `books:[{name,size}]` |
 | `bput` | `name` `off` `data`(base64，原文 ≤256B) | `next` `size` |
 | `bdel` | `name` | — |
@@ -65,6 +66,13 @@
 ```
 
 文件名只允许 ≤32 字节，不能含 `/`、`\`、`:`；单次 `blist` 最多回 8 本。
+
+上传前建议先发一次 `fsstat`，确认 `free` 大于文件大小（留 4KB 余量）：
+
+```
+{"pin":"123456","action":"fsstat"}
+{"ok":true,"action":"fsstat","params":{"total":1835008,"used":327680,"free":1507328,"heap":198432}}
+```
 
 ## 课表语义
 

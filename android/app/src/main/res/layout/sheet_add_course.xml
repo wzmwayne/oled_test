@@ -164,6 +164,16 @@
             android:textAllCaps="false" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnDeleteCourse"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="删除这门课"
+            android:textAllCaps="false"
+            android:textColor="@color/err"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnCancelCourse"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="match_parent"

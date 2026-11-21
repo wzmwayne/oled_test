@@ -323,6 +323,16 @@ static void handleJson(const char *in, size_t len) {
     if (appRtcReadUnix(&ts)) { resp["ok"] = true; resp["params"]["ts"] = ts; }
     else { resp["ok"] = false; resp["msg"] = "读 RTC 失败"; }
 
+  } else if (!strcmp(action, "fsstat")) {
+    /* 上传前先看空间，避免传到一半 littlefs 写失败 */
+    size_t total = LittleFS.totalBytes();
+    size_t used  = LittleFS.usedBytes();
+    resp["ok"] = true;
+    resp["params"]["total"] = (uint32_t)total;
+    resp["params"]["used"]  = (uint32_t)used;
+    resp["params"]["free"]  = (uint32_t)(total > used ? total - used : 0);
+    resp["params"]["heap"]  = (uint32_t)ESP.getFreeHeap();
+
   } else if (!strcmp(action, "blist")) {
     if (!LittleFS.exists(BOOK_DIR)) LittleFS.mkdir(BOOK_DIR);
     JsonArray arr = resp["params"]["books"].to<JsonArray>();

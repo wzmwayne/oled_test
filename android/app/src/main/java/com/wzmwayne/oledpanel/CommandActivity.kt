@@ -543,7 +543,13 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         view.findViewById<MaterialButton>(R.id.btnCancelNtp).setOnClickListener { dialog.dismiss() }
     }
 
+    /** 课表改为独立界面，这里只负责跳转 */
     private fun showCourses() {
+        startActivity(Intent(this, TimetableActivity::class.java))
+    }
+
+    /** 旧的内嵌课表面板，保留备用（当前不走这条路） */
+    private fun showCoursesSheet() {
         val (dialog, view) = showSheet(R.layout.sheet_course_list)
         val status = view.findViewById<TextView>(R.id.tvSheetStatus)
         val recycler = view.findViewById<RecyclerView>(R.id.rvCourses)
@@ -987,12 +993,27 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         }
 
         val name = sanitizeBookName(queryDisplayName(uri))
-        val total = (bytes.size + uploadChunkBytes - 1) / uploadChunkBytes
 
+        /* 先问设备还剩多少空间，避免传到一半 littlefs 写失败 */
+        BleManager.send(pin, "fsstat") { res, _ ->
+            val free = res?.params?.optLong("free", -1L) ?: -1L
+            val need = bytes.size.toLong() + 4096L
+            if (free >= 0 && free < need) {
+                toast("设备空间不足：剩余 " + free / 1024 + " KB，需要 " + need / 1024 + " KB")
+            } else {
+                startUpload(pin, name, bytes, free)
+            }
+        }
+    }
+
+    private fun startUpload(pin: String, name: String, bytes: ByteArray, free: Long) {
+        val total = (bytes.size + uploadChunkBytes - 1) / uploadChunkBytes
         uploadAbort = false
+        val tip = if (free >= 0) "剩余 " + free / 1024 + " KB · 共 " + total + " 块"
+                  else "共 " + total + " 块"
         val dlg = MaterialAlertDialogBuilder(this)
             .setTitle("上传 " + name)
-            .setMessage("0 / " + total + " 块")
+            .setMessage(tip)
             .setNegativeButton("取消") { _, _ -> uploadAbort = true }
             .setCancelable(false)
             .create()
