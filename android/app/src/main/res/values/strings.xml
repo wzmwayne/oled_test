@@ -32,5 +32,6 @@
     <string name="course_title">课表</string>
     <string name="course_empty">暂无课程</string>
     <string name="add_course">添加课程</string>
+    <string name="flip_parity">单双周互换</string>
     <string name="wifi_saved">已保存的 WiFi</string>
 </resources>

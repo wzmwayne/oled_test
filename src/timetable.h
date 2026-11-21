@@ -31,6 +31,10 @@ int   ttAdd(const char *name, int day, int start, int end, int parity);
 bool  ttDel(int i);
 void  ttClear();
 
+/* 全体单双周互换（1<->2，每周不动），返回改动条数。
+ * 用途：单双周按 ISO 周数判定，学校口径若整体反相，开学第一周点一下即可对齐。 */
+int   ttFlipParity();
+
 /* 单双周：按 ISO 周数奇偶判定（奇数周=单周） */
 bool  ttIsOddWeek();
 bool  ttMatches(const TtCourse *c);               /* 该课本周是否要上 */

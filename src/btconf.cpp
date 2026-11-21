@@ -337,6 +337,14 @@ static void handleJson(const char *in, size_t len) {
     resp["msg"] = ok ? "已删除" : "索引无效";
     resp["params"]["count"] = ttCount();
 
+  } else if (!strcmp(action, "fliptt")) {
+    /* 开学第一周对表用：单周课变双周、双周课变单周，每周课不动 */
+    int changed = ttFlipParity();
+    resp["ok"]  = true;
+    resp["msg"] = changed ? "单双周已互换" : "没有单双周课程需要互换";
+    resp["params"]["changed"] = changed;
+    resp["params"]["count"]   = ttCount();
+
   } else if (!strcmp(action, "cleartt")) {
     ttClear();
     resp["ok"]  = true;

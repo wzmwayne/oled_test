@@ -518,12 +518,14 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             dialog.dismiss()
             doAddCourse()
         }
-
         recycler.layoutManager = LinearLayoutManager(this)
         val adapter = CourseAdapter { course ->
             confirmDeleteCourse(course, dialog, status)
         }
         recycler.adapter = adapter
+        view.findViewById<MaterialButton>(R.id.btnFlipParity).setOnClickListener {
+            confirmFlipParity(adapter, status)
+        }
         loadCourses(adapter, status)
     }
 
@@ -698,6 +700,27 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             }
         }
         view.findViewById<MaterialButton>(R.id.btnCancelCourse).setOnClickListener { dialog.dismiss() }
+    }
+
+    /**
+     * 单双周按 ISO 周数判定。若学校口径与 ISO 整体反相，开学第一周点一次即可全部对调，
+     * 不用把每条单双周课程删了重录。
+     */
+    private fun confirmFlipParity(adapter: CourseAdapter, status: TextView) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("单双周互换")
+            .setMessage(
+                "把所有「单周」课程改成「双周」、把「双周」改成「单周」，每周都上的课不受影响。\n\n" +
+                    "用途：设备的单双周按 ISO 周数算，如果开学第一周对不上，点一次即可整体校正。"
+            )
+            .setNegativeButton("取消", null)
+            .setPositiveButton("互换") { _, _ ->
+                sendCommand("fliptt") { res, _ ->
+                    toastResult(res)
+                    if (res?.ok == true) loadCourses(adapter, status)
+                }
+            }
+            .show()
     }
 
     private fun confirmClearCourses() {

@@ -133,6 +133,16 @@ void ttClear() {
   ttSave();
 }
 
+int ttFlipParity() {
+  int changed = 0;
+  for (int i = 0; i < gTtN; i++) {
+    if (gTt[i].parity == 1)      { gTt[i].parity = 2; changed++; }
+    else if (gTt[i].parity == 2) { gTt[i].parity = 1; changed++; }
+  }
+  if (changed) ttSave();
+  return changed;
+}
+
 /* ==================== 查询 ==================== */
 /* 由主固件提供，避免这里反向依赖 .ino 里的 static 变量 */
 extern bool appNowYmd(int *y, int *m, int *d);

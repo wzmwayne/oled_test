@@ -45,6 +45,7 @@
 | `listtt` | `from`(≥0) `count`(1..6，固件实际按 ≤4 截断) | `total` `from` `courses:[{name,day,start,end,parity}]` |
 | `addcourse` | `name`(≤24 字节 UTF-8) `day`(1..7) `start`(0..1439) `end`(0..1439) `parity`(0/1/2) | `index` `count` |
 | `delcourse` | `index` | `count` |
+| `fliptt` | — | `changed` `count` |
 | `cleartt` | — | `count`(=0) |
 
 ## 课表语义
@@ -55,6 +56,8 @@
 - 单双周按 **ISO 8601 周数**判定：奇数周为单周。设备首次上电 RTC 未校时时按单周处理。
 - 容量：最多 60 条，保存时自动按 (星期, 开始时间) 排序，`index` 以排序后为准。
 - 存储：LittleFS `/tt.json`，改一次写一次，掉电不丢。
+- **`fliptt` 的意义**：单双周按 ISO 周数判定，若学校口径与之整体反相（开学第一周不是 ISO 奇数周），
+  调一次 `fliptt` 即可把所有单周课与双周课对调，不需要逐条重录。每周课（parity=0）不受影响。
 
 ## 示例
 
