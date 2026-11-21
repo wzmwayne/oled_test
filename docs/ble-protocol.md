@@ -46,6 +46,7 @@
 | `bput` | `name` `off` `data`(base64，原文 ≤256B) | `next` `size` |
 | `bdel` | `name` | — |
 | `gettt` | — | `count` `today`(1..7) `week_parity` |
+| `settt` | `data`(分片) / `end` / `reset` | `len` 或 `count` |
 | `listtt` | `from`(≥0) `count`(1..6，固件实际按 ≤4 截断) | `total` `from` `courses:[{name,day,start,end,parity}]` |
 | `addcourse` | `name`(≤24 字节 UTF-8) `day`(1..7) `start`(0..1439) `end`(0..1439) `parity`(0/1/2) | `index` `count` |
 | `delcourse` | `index` | `count` |
@@ -73,6 +74,23 @@
 {"pin":"123456","action":"fsstat"}
 {"ok":true,"action":"fsstat","params":{"total":1835008,"used":327680,"free":1507328,"heap":198432}}
 ```
+
+## 发课表（整表覆盖）
+
+一次 BLE 写放不下整张表，所以分三步，全部走同一个 `settt`：
+
+1. `{"settt":{"reset":true}}` —— 清空暂存区（可选，第一片之前发一次更保险）
+2. `{"settt":{"data":"<JSON 片段>"}}` —— 反复追加，每片 ≤300 字符，回包 `len` 是累计长度
+3. `{"settt":{"end":true}}` —— 解析并整表替换，回包 `count` 是写入条数
+
+载荷格式与设备内 `/tt.json` 相同，时间是**距 00:00 的分钟数**：
+
+```json
+{"c":[{"n":"数学","d":1,"s":530,"e":570,"p":0}]}
+```
+
+总大小上限 4KB（约 60 门课）；超过会返回错误并清空暂存区。
+解析失败时设备**保持原课表不变**，不会写坏。
 
 ## 课表语义
 
