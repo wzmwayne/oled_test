@@ -38,8 +38,30 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 
 | 命令 | 作用 |
 |---|---|
-| `info` | 打印全部运行信息（芯片 / 屏幕 / I2C / 字库 / 内存 / 刷新率） |
-| `help` 或 `?` | 命令列表 |
+| `info` | 打印全部运行信息（芯片 / 屏幕 / I2C / 字库 / 课表 / 内存 / 分区） |
+| `help` 或 `?` | 全部命令列表 |
+| `light on\|off` | 强制亮屏 / 息屏 |
+| `contrast 0x7F` | 屏幕对比度 |
+| `settime YYYY-MM-DD HH:MM:SS` | 写 DS3231 |
+| `verbose on\|off` | 心跳日志 |
+| `ls` | 列 LittleFS 文件 |
+
+### WiFi 调试（走 USB 串口，不占 GPIO）
+
+| 命令 | 作用 |
+|---|---|
+| `wifi` | 子命令帮助 |
+| `wifi on` / `wifi off` | 开 / 关射频 |
+| `wifi status` | 模式、状态、IP、信号、**最近一次断开原因 + 中文诊断** |
+| `wifi scan` | 扫描周边 AP，标出已保存的那几个 |
+| `wifi list` | 列出已保存的 WiFi |
+| `wifi conn <序号\|SSID> [密码]` | 连接，逐 3 秒打印状态迁移，失败给原因码与建议 |
+| `wifi ping <主机> [次数]` | ICMP ping |
+| `wifi curl [-I] <URL>` | HTTP(S) 请求：DNS / TCP / 首字节 / 状态码 / 正文头部，全带毫秒 |
+| `wifi dns <主机>` | 只验证 DNS |
+| `wifi ntp [服务器]` | 单次 SNTP 查询，并对比 RTC 快慢 |
+
+> 这些命令跑在独立任务（10KB 栈）里，TLS 握手不会打爆主循环栈；执行期间屏幕照常刷新，串口输出会与其他日志穿插。
 
 `info` 输出示例：
 

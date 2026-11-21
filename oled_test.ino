@@ -24,6 +24,7 @@
 #include "src/font_wqy14.h"
 #include "src/btconf.h"
 #include "src/timetable.h"
+#include "src/wifidbg.h"
 #include <time.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -990,6 +991,8 @@ static void ntpSyncTask(void *arg) {
 
   if (WiFi.status() != WL_CONNECTED) {
     logf("[NTP] 连接失败 最终状态=%s\r\n", wlName(WiFi.status()));
+    logf("[NTP] 最近断开原因=%s（串口执行 wifi status 看中文诊断）\r\n", wifiDbgLastReason());
+    logf("[NTP] 建议：wifi scan 看目标是否可见；wifi conn %d 复现连接过程\r\n", idx);
     ntpFail("WiFi 连接失败");
     goto done;
   }
@@ -1399,15 +1402,29 @@ static void handleCmd(char *cmd) {
   char *args = sp ? sp + 1 : NULL;
 
   if (!strcasecmp(cmd, "info")) printInfo();
-  else if (!strcasecmp(cmd, "help") || !strcmp(cmd, "?"))
-    logf("\r\n命令:\r\n"
-         "  info                              全部信息\r\n"
-         "  settime YYYY-MM-DD HH:MM:SS       写 DS3231\r\n"
-         "  contrast 0x7F                     调屏幕对比度(0-255)\r\n"
-         "  light on|off                      强制亮屏/息屏\r\n"
-         "  verbose on|off                    心跳日志\r\n"
-         "  ls                                列数据区\r\n"
-         "  help                              本帮助\r\n\r\n");
+  else if (!strcasecmp(cmd, "help") || !strcmp(cmd, "?")) {
+    logf("\r\n========== 串口命令 ==========\r\n");
+    logf("基础\r\n");
+    logf("  help | ?                         本帮助\r\n");
+    logf("  info                             芯片/屏幕/字库/课表/内存/分区\r\n");
+    logf("  light on|off                     强制亮屏 / 息屏\r\n");
+    logf("  contrast 0x7F                    对比度 0-255\r\n");
+    logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
+    logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
+    logf("  ls                               列 LittleFS 文件\r\n");
+    logf("WiFi 调试（USB 串口，不占用 GPIO）\r\n");
+    logf("  wifi                             子命令帮助\r\n");
+    logf("  wifi on | off                    开 / 关射频\r\n");
+    logf("  wifi status                      状态/IP/信号/最近断开原因\r\n");
+    logf("  wifi scan                        扫描周边 AP\r\n");
+    logf("  wifi list                        已保存的 WiFi\r\n");
+    logf("  wifi conn <序号|SSID> [密码]      连接，逐步打印状态与失败原因\r\n");
+    logf("  wifi ping <主机> [次数]           ICMP ping\r\n");
+    logf("  wifi curl [-I] <URL>              HTTP(S) 请求，带耗时与错误码\r\n");
+    logf("  wifi dns <主机>                   只做域名解析\r\n");
+    logf("  wifi ntp [服务器]                 单次 SNTP 查询并对比 RTC\r\n");
+    logf("==============================\r\n\r\n");
+  }
   else if (!strcasecmp(cmd, "light") && args) {
     if (!strcasecmp(args, "on")) screenWake(); else screenOff();
   }
@@ -1430,6 +1447,9 @@ static void handleCmd(char *cmd) {
     gVerbose = !strcasecmp(args, "on");
     logf("[命令] 心跳 %s\r\n", gVerbose ? "开" : "关");
   }
+  else if (!strcasecmp(cmd, "wifi")) {
+    wifiDbgRun(args);
+  }
   else if (!strcasecmp(cmd, "ls")) {
     if (!gFsOk) { logf("[命令] 未挂载\r\n"); return; }
     File root = LittleFS.open("/");
@@ -1440,8 +1460,9 @@ static void handleCmd(char *cmd) {
   else if (*cmd) logf("[命令] 未知: %s\r\n", cmd);
 }
 
-static char gCmdBuf[64];
-static uint8_t gCmdLen = 0;
+/* 命令行要放得下 URL（wifi curl https://…），64 字节不够 */
+static char gCmdBuf[192];
+static uint16_t gCmdLen = 0;
 static void cmdPoll(Stream &s) {
   while (s.available()) {
     char c = (char)s.read();
@@ -1470,6 +1491,7 @@ void setup() {
   gLedToggleAt = millis();
 
   keysInit();
+  wifiDbgBegin();          /* 注册 STA 断开事件，wifi status 能报原因码 */
   Wire.begin(OLED_SDA, OLED_SCL, 100000);
   Wire.setClock(gClock);
 
