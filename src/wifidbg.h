@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 void wifiDbgBegin();               /* setup 调一次：注册断线原因捕获 */
+void wifiSetPublicDns();           /* 连上后把 DNS 指到 223.5.5.5 / 114.114.114.114 */
 bool wifiDbgRun(const char *args); /* args = "wifi" 后面的整串 */
 void wifiDbgHelp();
 const char *wifiDbgLastReason();   /* 最近一次 STA 断开原因，没发生过返回 "-" */

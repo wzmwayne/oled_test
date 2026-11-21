@@ -775,7 +775,6 @@ static void drawSchedule() {
 
   if (n == 0) {
     drawCenter(ROW2, "这天没有课");
-    drawCenter(ROW3 + 2, "0/1翻 #换星期");
     return;
   }
   if (gSchSel >= n) gSchSel = n - 1;
@@ -860,7 +859,6 @@ static void drawBtConf() {
 static void drawStub(const char *title) {
   drawText(0, ROW0, title);
   drawCenterScaled(ROW1 + 1, "未实现", 2);
-  drawCenter(ROW3, "短按*回主页");
 }
 
 /* toast 覆盖第 4 行 */
@@ -998,6 +996,7 @@ static void ntpSyncTask(void *arg) {
   }
 
   logf("[NTP] 连接成功 耗时 %u ms\r\n", (unsigned)(millis() - t0));
+  wifiSetPublicDns();   /* 内置 223.5.5.5 / 114.114.114.114，避开路由器 DNS 故障 */
   logf("[NTP] IP=%s 掩码=%s\r\n",
        WiFi.localIP().toString().c_str(), WiFi.subnetMask().toString().c_str());
   logf("[NTP] 网关=%s DNS=%s\r\n",
@@ -1105,7 +1104,6 @@ static void drawSync() {
       drawTitleBar("ntp在线时间同步");
       drawMenuItem(ROW1, "当前时钟模块时间", gSyMenuSel == 0);
       drawMenuItem(ROW2, "开始校时",         gSyMenuSel == 1);
-      drawText(2, ROW3 + 2, "0/1选 #确认 *返回");
       break;
 
     case SY_TS: {
@@ -1115,7 +1113,6 @@ static void drawSync() {
       if (!s) { snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts); s = buf; }
       drawCenter(ROW1 + 4, "unix 时间戳");
       drawCenter(ROW2 + 2, s);
-      drawCenter(ROW3 + 2, "短按*返回");
       break;
     }
 
@@ -1124,7 +1121,6 @@ static void drawSync() {
       int n = btWifiCount();
       if (n == 0) {
         drawCenter(ROW2, "未保存 WiFi");
-        drawCenter(ROW3, "短按*返回");
       } else {
         int first = (gSyPickSel >= 3) ? gSyPickSel - 2 : 0;
         for (int i = 0; i < 3; i++) {
@@ -1154,7 +1150,6 @@ static void drawSync() {
         snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts);
         drawCenter(ROW2 + 2, buf);
       }
-      drawCenter(ROW3, "短按*返回");
       break;
     }
 
@@ -1162,7 +1157,6 @@ static void drawSync() {
       drawTitleBar("ntp在线时间同步");
       drawCenterScaled(ROW1 + 4, "同步失败", 1);
       drawCenter(ROW2 + 4, gNtpMsg);
-      drawCenter(ROW3, "短按*返回");
       break;
   }
 }

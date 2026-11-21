@@ -68,6 +68,17 @@ void wifiDbgBegin() {
   esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, onWifiEvent, NULL);
 }
 
+/* 内置公共 DNS：阿里 223.5.5.5 优先，114 兜底。
+ * 路由器下发的 DNS 有时不可用（运营商劫持/未下发），这组在校园网和家里都能解析。 */
+void wifiSetPublicDns() {
+  IPAddress d1(223, 5, 5, 5);
+  IPAddress d2(114, 114, 114, 114);
+  if (WiFi.setDNS(d1, d2))
+    appLog("[wifi] DNS 已内置: 223.5.5.5 (阿里) / 114.114.114.114\r\n");
+  else
+    appLog("[wifi] DNS 设置失败，仍用路由器下发的 %s\r\n", WiFi.dnsIP().toString().c_str());
+}
+
 const char *wifiDbgLastReason() {
   if (!gReasonOk) return "-";
   return WiFi.disconnectReasonName((wifi_err_reason_t)gReason);
@@ -284,6 +295,8 @@ static void cmdConn(char *arg) {
            WiFi.dnsIP().toString().c_str());
     appLog("[wifi] RSSI=%d dBm  信道=%d  BSSID=%s\r\n",
            (int)WiFi.RSSI(), (int)WiFi.channel(), WiFi.BSSIDstr().c_str());
+    wifiSetPublicDns();
+    appLog("[wifi] 生效 DNS : %s\r\n", WiFi.dnsIP().toString().c_str());
     if (WiFi.dnsIP() == IPAddress(0, 0, 0, 0))
       appLog("[wifi] 警告：DNS 为 0.0.0.0，域名解析会失败（路由器没下发 DNS）\r\n");
     return;
