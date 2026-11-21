@@ -46,6 +46,15 @@ extern void appLog(const char *fmt, ...);
 #ifndef WIFI_REASON_CONNECTION_FAIL
 #define WIFI_REASON_CONNECTION_FAIL 205
 #endif
+#ifndef WIFI_REASON_AUTH_EXPIRE
+#define WIFI_REASON_AUTH_EXPIRE 2
+#endif
+#ifndef WIFI_REASON_AUTH_LEAVE
+#define WIFI_REASON_AUTH_LEAVE 3
+#endif
+#ifndef WIFI_REASON_STA_LEAVING
+#define WIFI_REASON_STA_LEAVING 36
+#endif
 #ifndef WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
 #define WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY 210
 #endif
@@ -129,6 +138,12 @@ static const char *reasonHint(uint8_t r) {
     case WIFI_REASON_NO_AP_FOUND:
     case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
       return "找不到该 AP：核对 SSID 拼写；ESP32-C3 只支持 2.4GHz；隐藏 SSID 也扫不到";
+    case WIFI_REASON_AUTH_EXPIRE:
+      return "认证无应答（AUTH_EXPIRE）：AP 不回应认证请求。常见于密码错、AP 开了 MAC 过滤/黑名单，"
+             "或 WPA2/WPA3 过渡模式与 PMF 不兼容。先拿另一台手机开热点验证设备";
+    case WIFI_REASON_AUTH_LEAVE:
+    case WIFI_REASON_STA_LEAVING:
+      return "本地主动离开：上一轮连接被取消，属于重连过程中的正常收尾";
     case WIFI_REASON_AUTH_FAIL:
       return "认证失败：密码错误，或 AP 用了设备不支持的加密方式（WPA3-Enterprise 等）";
     case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
@@ -378,9 +393,11 @@ static void cmdConn(char *arg) {
   appLog("[wifi] 连接失败，耗时 %u ms，最终状态=%s(%d)\r\n", (unsigned)el,
          statusName(WiFi.status()), (int)WiFi.status());
   printEventStats();
-  if (gEvStart == 0) {
-    appLog("[wifi] 一个 STA_START 都没有：射频/网卡没启动，和密码、SSID 无关\r\n");
-    appLog("[wifi] 处理：wifi reset 复位后再试；仍不行就怀疑与 BLE 共存时的射频冲突\r\n");
+  /* 注意：预扫描时 STA 已经启动过，begin() 前又清了计数，
+   * 所以「START=0」不能推出「射频没启动」——只有连断开事件都没有时才是真的没动作。 */
+  if (gEvDisconnected == 0) {
+    appLog("[wifi] 连一次断开事件都没收到：射频根本没发起过连接\r\n");
+    appLog("[wifi] 处理：wifi reset 复位后再试\r\n");
   } else if (!gReasonOk) {
     appLog("[wifi] 有 STA_START 但没有断开事件：多半还卡在扫描/关联阶段\r\n");
     appLog("[wifi] 检查：SSID 是否 2.4GHz、信号是否够（< -85 基本连不上）\r\n");
