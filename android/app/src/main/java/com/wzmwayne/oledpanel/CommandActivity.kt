@@ -140,6 +140,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
 
         bindRow(R.id.rowGetTime, "gettime", "读取设备 RTC 时间") { doGetTime() }
         bindRow(R.id.rowSetTime, "settime", "选择本地时间并写入设备") { doSetTime() }
+        bindRow(R.id.rowSyncNow, "同步为本地时间", "一键写入手机当前时间") { doSyncNow() }
         bindRow(R.id.rowSetNtp, "setntp", "设置 NTP 服务器与时区") { doSetNtp() }
 
         bindRow(R.id.rowCourseView, "查看课表", "分页读取完整课表") { showCourses() }
@@ -435,6 +436,25 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             now.get(Calendar.MONTH),
             now.get(Calendar.DAY_OF_MONTH)
         ).show()
+    }
+
+    /** 一键把手机当前时间写入设备 RTC（走 settime，UTC 秒） */
+    private fun doSyncNow() {
+        val ts = System.currentTimeMillis() / 1000L
+        MaterialAlertDialogBuilder(this)
+            .setTitle("同步为本地时间")
+            .setMessage(
+                "将把手机当前时间写入设备：\n" +
+                    formatTime(ts, false) + "（本地）\n" +
+                    formatTime(ts, true) + "（UTC）"
+            )
+            .setNegativeButton("取消", null)
+            .setPositiveButton("写入") { _, _ ->
+                sendCommand("settime", JSONObject().put("ts", ts)) { res, _ ->
+                    toastResult(res)
+                }
+            }
+            .show()
     }
 
     private fun doSetNtp() {

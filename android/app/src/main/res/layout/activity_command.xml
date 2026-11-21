@@ -259,6 +259,10 @@
                         layout="@layout/item_action_row" />
 
                     <include
+                        android:id="@+id/rowSyncNow"
+                        layout="@layout/item_action_row" />
+
+                    <include
                         android:id="@+id/rowSetNtp"
                         layout="@layout/item_action_row" />
                 </LinearLayout>
