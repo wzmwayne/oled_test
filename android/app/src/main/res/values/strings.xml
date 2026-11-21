@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OLED 时钟</string>
+    <string name="scan_subtitle">桌面时钟 · BLE 配置</string>
+    <string name="status_idle">尚未连接</string>
+    <string name="scan">扫描设备</string>
+    <string name="stop_scan">停止扫描</string>
+    <string name="rescan">重新扫描</string>
+    <string name="open_console">进入命令台</string>
+    <string name="disconnect">断开</string>
+    <string name="connect">连接</string>
+    <string name="last_connected">上次连接</string>
+    <string name="nearby_devices">附近设备</string>
+    <string name="scan_hint">点击设备即可连接</string>
+    <string name="scan_empty">未发现设备。请确认设备已上电、蓝牙已开启；Android 11 及以下还需要开启定位服务。</string>
+    <string name="permission_title">需要蓝牙权限</string>
+    <string name="permission_body">需要「附近的设备」权限才能扫描并连接 OLED 时钟。若已拒绝，请到系统设置中手动授予。</string>
+    <string name="go_settings">去设置</string>
+    <string name="ble_unsupported_title">此设备不支持 BLE</string>
+    <string name="ble_unsupported_body">当前手机没有低功耗蓝牙能力，无法连接 OLED 时钟。</string>
+    <string name="pin_hint">设备 PIN（6 位数字）</string>
+    <string name="pin_helper">自动保存，用于设备鉴权</string>
+    <string name="console_title">命令台</string>
+    <string name="logs">日志</string>
+    <string name="copy">复制</string>
+    <string name="clear">清空</string>
+    <string name="close">关闭</string>
+    <string name="cancel">取消</string>
+    <string name="back">返回</string>
+    <string name="log_title">通信日志</string>
+    <string name="log_empty">还没有收发记录</string>
+    <string name="course_title">课表</string>
+    <string name="course_empty">暂无课程</string>
+    <string name="add_course">添加课程</string>
+    <string name="wifi_saved">已保存的 WiFi</string>
+</resources>

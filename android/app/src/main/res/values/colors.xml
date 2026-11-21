@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0F1115</color>
+    <color name="surface">#1A1E26</color>
+    <color name="surface2">#232936</color>
+    <color name="line">#2B3240</color>
+    <color name="fg">#E6E9EF</color>
+    <color name="dim">#8B95A5</color>
+    <color name="accent">#4D9FFF</color>
+    <color name="ok">#3DDC97</color>
+    <color name="warn">#FFB454</color>
+    <color name="err">#FF6B6B</color>
+    <color name="tx">#4D9FFF</color>
+    <color name="rx">#3DDC97</color>
+    <color name="ok_soft">#1F3DDC97</color>
+    <color name="err_soft">#1FFF6B6B</color>
+    <color name="muted_soft">#332B3240</color>
+    <color name="ic_launcher_background">#0F1115</color>
+</resources>
