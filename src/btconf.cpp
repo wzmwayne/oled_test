@@ -11,6 +11,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_random.h>
+#include <LittleFS.h>
 #include "timetable.h"
 
 /* ---------- UUID ---------- */
@@ -158,6 +159,44 @@ bool btWifiDel(const char *ssid) {
   return true;
 }
 
+/* ==================== 书籍上传（base64 分块） ==================== */
+#define BOOK_DIR "/books"
+
+static int b64val(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static int b64decode(const char *in, uint8_t *out, int max) {
+  int v = 0, bits = -8, n = 0;
+  for (const char *p = in; *p; p++) {
+    if (*p == '=') break;
+    int d = b64val(*p);
+    if (d < 0) continue;            /* 跳过换行/空格 */
+    v = (v << 6) | d;
+    bits += 6;
+    if (bits >= 0) {
+      if (n >= max) return -1;
+      out[n++] = (uint8_t)((v >> bits) & 0xFF);
+      bits -= 8;
+    }
+  }
+  return n;
+}
+
+/* 只允许简单的文件名，防止 ../ 越界 */
+static bool bookNameOk(const char *n) {
+  if (!n || !*n || strlen(n) > 32) return false;
+  for (const char *p = n; *p; p++) {
+    if (*p == '/' || *p == '\\' || *p == ':') return false;
+  }
+  return true;
+}
+
 /* 本地星期 1..7（周一=1，周日=7），课表按这个编号存 */
 static int localWeekday() {
   int y = 0, mo = 1, d = 1;
@@ -283,6 +322,78 @@ static void handleJson(const char *in, size_t len) {
     uint32_t ts = 0;
     if (appRtcReadUnix(&ts)) { resp["ok"] = true; resp["params"]["ts"] = ts; }
     else { resp["ok"] = false; resp["msg"] = "读 RTC 失败"; }
+
+  } else if (!strcmp(action, "blist")) {
+    if (!LittleFS.exists(BOOK_DIR)) LittleFS.mkdir(BOOK_DIR);
+    JsonArray arr = resp["params"]["books"].to<JsonArray>();
+    int n = 0;
+    File dir = LittleFS.open(BOOK_DIR);
+    if (dir) {
+      File f = dir.openNextFile();
+      while (f && n < 8) {
+        if (!f.isDirectory()) {
+          const char *nm = f.name();
+          const char *slash = strrchr(nm, '/');
+          JsonObject o = arr.add<JsonObject>();
+          o["name"] = slash ? slash + 1 : nm;
+          o["size"] = (uint32_t)f.size();
+          n++;
+        }
+        f.close();
+        f = dir.openNextFile();
+      }
+      dir.close();
+    }
+    resp["ok"] = true;
+    resp["params"]["count"] = n;
+
+  } else if (!strcmp(action, "bput")) {
+    /* {"name":"三体.txt","off":0,"data":"<base64>"} —— 每包原文 <= 256 字节 */
+    const char *name = params["name"] | "";
+    uint32_t off = params["off"] | 0;
+    const char *data = params["data"] | "";
+    if (!bookNameOk(name)) {
+      resp["ok"] = false;
+      resp["msg"] = "文件名不合法";
+    } else {
+      static uint8_t buf[320];
+      int n = b64decode(data, buf, sizeof(buf));
+      if (n <= 0) {
+        resp["ok"] = false;
+        resp["msg"] = "base64 解码失败";
+      } else {
+        if (!LittleFS.exists(BOOK_DIR)) LittleFS.mkdir(BOOK_DIR);
+        char path[64];
+        snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
+        File f = LittleFS.open(path, "r+");
+        if (!f) f = LittleFS.open(path, "w+");
+        if (!f) {
+          resp["ok"] = false;
+          resp["msg"] = "无法创建文件（空间不足？）";
+        } else {
+          f.seek(off);
+          size_t wrote = f.write(buf, n);
+          uint32_t sz = f.size();
+          f.close();
+          resp["ok"] = true;
+          resp["params"]["next"] = off + (uint32_t)wrote;
+          resp["params"]["size"] = sz;
+        }
+      }
+    }
+
+  } else if (!strcmp(action, "bdel")) {
+    const char *name = params["name"] | "";
+    if (!bookNameOk(name)) {
+      resp["ok"] = false;
+      resp["msg"] = "文件名不合法";
+    } else {
+      char path[64];
+      snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
+      bool ok = LittleFS.remove(path);
+      resp["ok"] = ok;
+      resp["msg"] = ok ? "已删除" : "文件不存在";
+    }
 
   } else if (!strcmp(action, "gettt")) {
     resp["ok"] = true;

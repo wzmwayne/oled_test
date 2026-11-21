@@ -41,12 +41,30 @@
 | `settime` | `ts`（UTC 秒） | — |
 | `gettime` | — | `ts`（UTC 秒） |
 | `unpair` | — | —（清配对并重启服务，连接会断） |
+| `blist` | — | `count` `books:[{name,size}]` |
+| `bput` | `name` `off` `data`(base64，原文 ≤256B) | `next` `size` |
+| `bdel` | `name` | — |
 | `gettt` | — | `count` `today`(1..7) `week_parity` |
 | `listtt` | `from`(≥0) `count`(1..6，固件实际按 ≤4 截断) | `total` `from` `courses:[{name,day,start,end,parity}]` |
 | `addcourse` | `name`(≤24 字节 UTF-8) `day`(1..7) `start`(0..1439) `end`(0..1439) `parity`(0/1/2) | `index` `count` |
 | `delcourse` | `index` | `count` |
 | `fliptt` | — | `changed` `count` |
 | `cleartt` | — | `count`(=0) |
+
+## 书籍上传（阅读器）
+
+纯文本放 LittleFS `/books/*.txt`（UTF-8）。因为一次 notify 装不下整本书，按块上传：
+
+1. 客户端从 `off=0` 开始，每包原文字节数 **≤256**，base64 后约 342 字符；
+2. 每包回包里的 `next` 就是下一包的 `off`，`size` 是当前文件长度；
+3. 断点续传直接用已有的 `off`，服务端是随机写入，不依赖会话状态。
+
+```
+{"pin":"123456","action":"bput","params":{"name":"三体.txt","off":0,"data":"5LiJ5L2T"}}
+{"ok":true,"action":"bput","params":{"next":256,"size":256}}
+```
+
+文件名只允许 ≤32 字节，不能含 `/`、`\`、`:`；单次 `blist` 最多回 8 本。
 
 ## 课表语义
 

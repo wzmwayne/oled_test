@@ -25,6 +25,7 @@
 #include "src/btconf.h"
 #include "src/timetable.h"
 #include "src/wifidbg.h"
+#include "src/reader.h"
 #include <time.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -264,6 +265,12 @@ static const wqy14_glyph_t *findGlyph(uint32_t cp) {
     if (r < cp) lo = mid + 1; else hi = mid - 1;
   }
   return nullptr;
+}
+
+/* 供 reader.cpp 排版用：拿不到字形就按 8px 算 */
+int appCpWidth(uint32_t cp) {
+  const wqy14_glyph_t *g = findGlyph(cp);
+  return g ? g->w : 8;
 }
 
 static uint32_t utf8Next(const char *&s) {
@@ -867,6 +874,22 @@ static void drawBtConf() {
   drawCenter(50, btStateText());
 }
 
+/* 阅读器：无标题栏，4 行铺满，底部 1px 进度条 */
+static void drawReader() {
+  if (!rdLoaded()) {
+    drawTitleBar("阅读器");
+    drawCenter(ROW2, "还没有书");
+    drawCenter(ROW3 + 2, "App 上传 txt");
+    return;
+  }
+  for (int i = 0; i < RD_LINES; i++) drawText(0, i * 15, rdLine(i));
+
+  int pct = rdPercent();
+  int w = SCREEN_W * pct / 100;
+  if (w < 1) w = 1;
+  hline(0, w - 1, 63);
+}
+
 static void drawStub(const char *title) {
   drawText(0, ROW0, title);
   drawCenterScaled(ROW1 + 1, "未实现", 2);
@@ -1175,6 +1198,7 @@ static void drawSync() {
 /* ==================== 导航 ==================== */
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
+  if (gApp == APP_READER) rdSaveProgress(); /* 离开阅读器先记下读到的位置 */
   if (gApp != APP_HOME) gLastApp = gApp;
   gApp = APP_HOME;
   gScr = SCR_APP;
@@ -1189,6 +1213,7 @@ static void enterApp(int id) {
   gLastActivity = millis();
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
+  if (id == APP_READER) rdOpenLast();       /* 自动接着上次读到的地方 */
   if (id == APP_SYNC) {                     /* 进页面只重置到菜单，等用户确认 */
     gSyPage = SY_MENU; gSyMenuSel = 0; gSyPickSel = 0;
     gNtpState = NTP_IDLE; gNtpBusy = false;
@@ -1304,7 +1329,12 @@ static void handleKeys() {
     }
 
     case APP_READER:
-      if (starS) goHome();
+      /* 0/1 翻页（长按连翻），# 看进度、长按 # 换下一本，* 回主页 */
+      if (oneS  || oneR)  rdNext();
+      if (zeroS || zeroR) rdPrev();
+      if (hashS) { char b[16]; snprintf(b, sizeof(b), "%d%%", rdPercent()); appToast(b, 1200); }
+      if (hashL) { if (!rdNextBook()) appToast("只有这一本", 1200); }
+      if (starS) { rdSaveProgress(); goHome(); }
       break;
 
     case APP_SYNC:
@@ -1550,6 +1580,7 @@ void setup() {
   if (gFsOk) {
     ttBegin();
     logf("[课表] %d 条，本周%s\r\n", ttCount(), ttIsOddWeek() ? "单周" : "双周");
+    rdInit();
   }
 
   gApp = APP_HOME;
@@ -1621,7 +1652,7 @@ void loop() {
           case APP_STOPWATCH: drawStopwatch(); break;
           case APP_TIMER:     drawTimer(); break;
           case APP_SCHEDULE:  drawSchedule(); break;
-          case APP_READER:    drawStub("阅读器"); break;
+          case APP_READER:    drawReader(); break;
           case APP_BTCONF:    drawBtConf(); break;
           case APP_SYNC:      drawSync(); break;
         }
