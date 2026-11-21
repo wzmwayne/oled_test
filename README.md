@@ -64,6 +64,14 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 
 > 这些命令跑在独立任务（10KB 栈）里，TLS 握手不会打爆主循环栈；执行期间屏幕照常刷新，串口输出会与其他日志穿插。
 
+### 核心日志
+
+`build_opt.h` 里 `-DCORE_DEBUG_LEVEL=5` 会把 Arduino 核心与 WiFi 驱动的
+`log_e`/`log_w`/`log_i` 全部打开，配合 setup 里的 `Serial.setDebugOutput(true)`
+（把核心日志从 UART0 改路由到 USB CDC）就能看到驱动内部到底卡在哪一步。
+
+排查完把 `build_opt.h` 那行改回 `-DCORE_DEBUG_LEVEL=0` 再编，否则日志量很大。
+
 `info` 输出示例：
 
 ```

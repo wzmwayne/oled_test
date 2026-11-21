@@ -1482,6 +1482,9 @@ static void cmdPoll(Stream &s) {
 /* ==================== setup / loop ==================== */
 void setup() {
   Serial.begin(115200);
+  /* 核心与驱动的 log_x 默认走 UART0；插上 USB 时没人看得到。
+   * 打开后改走 USB CDC，配合 build_opt.h 的 CORE_DEBUG_LEVEL=5 才有效。 */
+  Serial.setDebugOutput(true);
   Serial0.begin(115200, SERIAL_8N1, -1, TTL_TX_PIN);
   uint32_t tUsb = millis();
   while (!Serial && millis() - tUsb < 1200) delay(10);
@@ -1489,6 +1492,7 @@ void setup() {
 
   logf("\r\n===== 桌面时钟终端 =====\r\n");
   logf("按键 K1=* K2=0 K3=1 K4=#\r\n");
+  logf("[调试] CORE_DEBUG_LEVEL=%d（0=关 5=最详细）\r\n", CORE_DEBUG_LEVEL);
 
   /* 板载 LED：先熄灭，再由 loop 闪 3 秒 */
   pinMode(LED_PIN, OUTPUT);
