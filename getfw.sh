@@ -8,7 +8,9 @@ REPO="wzmwayne/oled_test"
 DST="/sdcard/Download"
 MODE="${1:-app}"
 
-TAG=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName')
+# 只看固件构建（build-<n>），排除安卓 App 的 apk-build-<n>，否则会拉到没有 bin 的 release
+TAG=$(gh release list --repo "$REPO" --limit 30 --json tagName \
+        --jq '[.[] | select(.tagName | test("^build-[0-9]+$"))][0].tagName')
 if [ -z "$TAG" ]; then
   echo "取不到 release tag" >&2
   exit 1

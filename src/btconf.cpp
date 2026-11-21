@@ -11,6 +11,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_random.h>
+#include "timetable.h"
 
 /* ---------- UUID ---------- */
 #define BT_SVC_UUID  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -157,6 +158,16 @@ bool btWifiDel(const char *ssid) {
   return true;
 }
 
+/* 本地星期 1..7（周一=1，周日=7），课表按这个编号存 */
+static int localWeekday() {
+  int y = 0, mo = 1, d = 1;
+  if (!appNowYmd(&y, &mo, &d)) return 1;
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  if (mo < 3) y -= 1;
+  int w = (y + y / 4 - y / 100 + y / 400 + t[mo - 1] + d) % 7;   /* 0=周日 */
+  return (w == 0) ? 7 : w;
+}
+
 /* ==================== 回包 ==================== */
 static void reply(JDoc &d) {
   if (!gChr) return;
@@ -214,6 +225,8 @@ static void handleJson(const char *in, size_t len) {
     resp["params"]["ntp"]        = ntp;
     resp["params"]["tz"]         = tz;
     resp["params"]["wifi_count"] = btWifiCount();
+    resp["params"]["tt_count"]   = ttCount();
+    resp["params"]["week_parity"] = ttIsOddWeek() ? 1 : 2;
 
   } else if (!strcmp(action, "listwifi")) {
     int n = btWifiCount();
@@ -270,6 +283,65 @@ static void handleJson(const char *in, size_t len) {
     uint32_t ts = 0;
     if (appRtcReadUnix(&ts)) { resp["ok"] = true; resp["params"]["ts"] = ts; }
     else { resp["ok"] = false; resp["msg"] = "读 RTC 失败"; }
+
+  } else if (!strcmp(action, "gettt")) {
+    resp["ok"] = true;
+    resp["params"]["count"]       = ttCount();
+    resp["params"]["today"]       = localWeekday();
+    resp["params"]["week_parity"] = ttIsOddWeek() ? 1 : 2;
+
+  } else if (!strcmp(action, "listtt")) {
+    /* 分页：一次最多 4 条，保证整包响应能塞进一次 notify（MTU 517 -> 514B） */
+    int from = params["from"]  | 0;
+    int cnt  = params["count"] | 4;
+    if (from < 0) from = 0;
+    if (cnt < 1) cnt = 1;
+    if (cnt > 4) cnt = 4;
+    int total = ttCount();
+    JsonArray arr = resp["params"]["courses"].to<JsonArray>();
+    for (int i = from; i < total && i < from + cnt; i++) {
+      const TtCourse *c = ttGet(i);
+      if (!c) break;
+      JsonObject o = arr.add<JsonObject>();
+      o["name"]   = c->name;
+      o["day"]    = c->day;
+      o["start"]  = c->start;
+      o["end"]    = c->end;
+      o["parity"] = c->parity;
+    }
+    resp["ok"] = true;
+    resp["params"]["total"] = total;
+    resp["params"]["from"]  = from;
+
+  } else if (!strcmp(action, "addcourse")) {
+    const char *name = params["name"] | "";
+    int day   = params["day"]    | 0;
+    int start = params["start"]  | -1;
+    int end   = params["end"]    | -1;
+    int par   = params["parity"] | 0;
+    int idx = ttAdd(name, day, start, end, par);
+    if (idx < 0) {
+      resp["ok"]  = false;
+      resp["msg"] = "保存失败：名称/星期/时间不合法，或已满 60 条";
+    } else {
+      resp["ok"]  = true;
+      resp["msg"] = "已保存";
+      resp["params"]["index"] = idx;
+      resp["params"]["count"] = ttCount();
+    }
+
+  } else if (!strcmp(action, "delcourse")) {
+    int idx = params["index"] | -1;
+    bool ok = ttDel(idx);
+    resp["ok"]  = ok;
+    resp["msg"] = ok ? "已删除" : "索引无效";
+    resp["params"]["count"] = ttCount();
+
+  } else if (!strcmp(action, "cleartt")) {
+    ttClear();
+    resp["ok"]  = true;
+    resp["msg"] = "课表已清空";
+    resp["params"]["count"] = 0;
 
   } else if (!strcmp(action, "unpair")) {
     NimBLEDevice::deleteAllBonds();

@@ -23,6 +23,7 @@
 #include <esp_partition.h>
 #include "src/font_wqy14.h"
 #include "src/btconf.h"
+#include "src/timetable.h"
 #include <time.h>
 #include <WiFi.h>
 #include <Preferences.h>
@@ -553,6 +554,13 @@ static void rtcTick() {
 }
 static uint32_t subMilli() { return (millis() - gNowMs) % 1000; }
 
+/* 供 timetable.cpp 算 ISO 周数用，避免它直接依赖这里的 static 变量 */
+bool appNowYmd(int *y, int *m, int *d) {
+  if (!gNowOk) return false;
+  *y = gNow.year; *m = gNow.month; *d = gNow.day;
+  return true;
+}
+
 /* ---------------- 唤醒后的按键锁 ----------------
  * 长按 0/1 唤醒时手指还按着，按键的 repeat 事件会持续产生。
  * 直接放开的话，倒计时页会被一路加秒。
@@ -602,6 +610,81 @@ static void wakeUp(WakeSource src) {
   if (src == WAKE_TIMER_DONE) toast("时间到", 4000);
 }
 
+/* ---------------- 走马灯 ----------------
+ * 课表那行文案经常超过 128px（"下节 高等数学 还有45分 · 16:40放学"），
+ * 超过 128px 就横向滚动：首尾各停 800ms，中间每 45ms 走 2px；
+ * 放得下就居中静态显示，不折腾。 */
+static char     gMqText[64] = "";
+static int16_t  gMqOff = 0;
+static uint32_t gMqNext = 0;
+
+static void drawMarquee(int y, const char *s) {
+  int w = textWidthScaled(s, 1);
+  if (w <= SCREEN_W) {
+    gMqText[0] = 0; gMqOff = 0;
+    drawCenter(y, s);
+    return;
+  }
+  if (strcmp(gMqText, s) != 0) {          /* 文案变了就从头滚 */
+    snprintf(gMqText, sizeof(gMqText), "%s", s);
+    gMqOff = 0;
+    gMqNext = millis() + 800;
+    drawText(0, y, s);
+    return;
+  }
+  uint32_t now = millis();
+  if ((int32_t)(now - gMqNext) >= 0) {
+    gMqOff += 2;
+    if (gMqOff > w + 20) { gMqOff = 0; gMqNext = now + 800; }
+    else                 { gMqNext = now + 45; }
+  }
+  drawText(-gMqOff, y, s);
+}
+
+static void hhmm(char *buf, size_t n, uint16_t min) {
+  snprintf(buf, n, "%u:%02u", (unsigned)(min / 60), (unsigned)(min % 60));
+}
+
+/* 主页第 4 行：正在上的课 → 下节课 → 已放学 → 今日无课 */
+static void drawHomeSchedule() {
+  if (!gNowOk) { drawCenter(ROW3, "--"); return; }
+
+  char line[64], t1[8], t2[8];
+  int  today  = weekdayFromDate(gNow.year, gNow.month, gNow.day) + 1;  /* 0=周日 -> 7 */
+  int  nowMin = (int)gNow.hour * 60 + gNow.minute;
+  int  endMin = 0;
+  bool hasEnd = ttDayEnd(today, &endMin);
+
+  int cur = ttNowIdx(today, nowMin);
+  int nxt = ttNextIdx(today, nowMin);
+
+  if (cur >= 0) {
+    const TtCourse *c = ttGet(cur);
+    if (hasEnd) {
+      hhmm(t2, sizeof(t2), (uint16_t)endMin);
+      snprintf(line, sizeof(line), "正在上 %s 剩%d分 · %s放学", c->name, (int)c->end - nowMin, t2);
+    } else {
+      snprintf(line, sizeof(line), "正在上 %s 剩%d分", c->name, (int)c->end - nowMin);
+    }
+  } else if (nxt >= 0) {
+    const TtCourse *c = ttGet(nxt);
+    hhmm(t1, sizeof(t1), c->start);
+    if (hasEnd) {
+      hhmm(t2, sizeof(t2), (uint16_t)endMin);
+      snprintf(line, sizeof(line), "下节 %s %s · 还有%d分 · %s放学", c->name, t1,
+               (int)c->start - nowMin, t2);
+    } else {
+      snprintf(line, sizeof(line), "下节 %s %s · 还有%d分", c->name, t1, (int)c->start - nowMin);
+    }
+  } else if (hasEnd) {
+    hhmm(t2, sizeof(t2), (uint16_t)endMin);
+    snprintf(line, sizeof(line), "今日课已结束 · %s放学", t2);
+  } else {
+    snprintf(line, sizeof(line), "今日无课");
+  }
+  drawMarquee(ROW3, line);
+}
+
 /* ---------------- 各页面绘制 ---------------- */
 static void drawHome() {
   char l1[32], l2[16];
@@ -615,7 +698,7 @@ static void drawHome() {
     drawText(0, ROW0, "--.--.--");
     drawCenterScaled(ROW1 + 1, "--:--:--", 2);
   }
-  drawCenter(ROW3, "暂无课表");
+  drawHomeSchedule();
 }
 
 static void drawPrecise() {
@@ -665,10 +748,54 @@ static void drawTimer() {
   }
 }
 
+static const char *DAY_CN[7] = {"一", "二", "三", "四", "五", "六", "日"};
+
+static int  gSchSel = 0;    /* 列表光标 */
+static int  gSchDay = 0;    /* 0=跟随今天，1..7=指定星期 */
+
+static int schShowDay() {
+  if (gSchDay >= 1 && gSchDay <= 7) return gSchDay;
+  if (!gNowOk) return 1;
+  return weekdayFromDate(gNow.year, gNow.month, gNow.day) + 1;
+}
+
+/* 列表行：8:05-9:40 高等数学
+ * 128px 里时间要占 63~77px，课名放不下就截断；选中行反白。 */
 static void drawSchedule() {
-  drawText(0, ROW0, "课表");
-  drawCenterScaled(ROW1 + 1, "未实现", 2);
-  drawCenter(ROW3, "短按*返回主页");
+  int  idx[TT_MAX];
+  int  day = schShowDay();
+  int  n   = ttDayList(day, idx, TT_MAX);
+  char buf[64], t1[8], t2[8];
+
+  snprintf(buf, sizeof(buf), "课表 %s%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
+  drawTitleBar(buf);
+
+  if (n == 0) {
+    drawCenter(ROW2, "这天没有课");
+    drawCenter(ROW3 + 2, "0/1翻 #换星期");
+    return;
+  }
+  if (gSchSel >= n) gSchSel = n - 1;
+  if (gSchSel < 0)  gSchSel = 0;
+
+  int first = (gSchSel >= 3) ? gSchSel - 2 : 0;
+  for (int i = 0; i < 3; i++) {
+    int k = first + i;
+    if (k >= n) break;
+    const TtCourse *c = ttGet(idx[k]);
+    hhmm(t1, sizeof(t1), c->start);
+    hhmm(t2, sizeof(t2), c->end);
+    snprintf(buf, sizeof(buf), "%s-%s %s", t1, t2, c->name);
+    int y = ROW1 + i * 16;
+    if (k == gSchSel) {
+      fillRect(0, y, SCREEN_W - 1, y + 14);
+      drawTextMode(0, y, buf, 1, false);
+    } else {
+      drawText(0, y, buf);
+    }
+  }
+  if (first > 0)     fillRect(124, 2, 127, 5);
+  if (first + 3 < n) fillRect(124, 58, 127, 61);
 }
 
 static void drawMenu() {
@@ -1154,7 +1281,18 @@ static void handleKeys() {
       break;
     }
 
-    case APP_SCHEDULE:
+    case APP_SCHEDULE: {
+      /* 0/1 翻课；# 短按换星期（今天→周一…周日），长按回今天；短按 * 回主页 */
+      int idx[TT_MAX];
+      int n = ttDayList(schShowDay(), idx, TT_MAX);
+      if ((zeroS || zeroR) && gSchSel > 0)     gSchSel--;
+      if ((oneS  || oneR)  && gSchSel < n - 1) gSchSel++;
+      if (hashL) { gSchDay = 0; gSchSel = 0; }
+      else if (hashS) { gSchDay = (gSchDay + 1) % 8; gSchSel = 0; }
+      if (starS) goHome();
+      break;
+    }
+
     case APP_READER:
       if (starS) goHome();
       break;
@@ -1245,6 +1383,7 @@ static void printInfo() {
        (gWakeLocks & WL_STOPWATCH) ? "正计时 " : "",
        (gWakeLocks & WL_TIMER) ? "倒计时" : "");
   logf("字库    : %s\r\n", gWqy14 ? "已 mmap" : "未加载");
+  logf("课表    : %d 条，本周%s\r\n", ttCount(), ttIsOddWeek() ? "单周" : "双周");
   logf("循环    : 最坏 %u ms\r\n", (unsigned)gLoopMaxMs);
   logf("自由堆  : %u B\r\n", (unsigned)ESP.getFreeHeap());
   printPartitions();
@@ -1370,6 +1509,10 @@ void setup() {
 
   gFsOk = LittleFS.begin(true, "/littlefs", 10, "spiffs");
   logf("[存储] %s %u KB\r\n", gFsOk ? "OK" : "失败", gFsOk ? (unsigned)(LittleFS.totalBytes() / 1024) : 0u);
+  if (gFsOk) {
+    ttBegin();
+    logf("[课表] %d 条，本周%s\r\n", ttCount(), ttIsOddWeek() ? "单周" : "双周");
+  }
 
   gApp = APP_HOME;
   gScr = SCR_APP;
@@ -1424,6 +1567,7 @@ void loop() {
 
     /* 走毫秒的页面都要高帧率；局部刷新后单帧 2-3ms，60fps 撑得住 */
     uint32_t interval = 120;
+    if (gScr == SCR_APP && gApp == APP_HOME)      interval = 60;   /* 走马灯 45ms 一步 */
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
     if (gScr == SCR_APP && gApp == APP_SYNC)   interval = 60;   /* 同步进度 16fps */

@@ -31,6 +31,7 @@ bool btWifiDel(const char *ssid);
 bool btCfgGetNtp(char *srv, size_t sl, int *tz);
 
 /* ---- 由主固件（oled_test.ino）提供 ---- */
+extern bool appNowYmd(int *y, int *m, int *d);   /* 本地日期，课表算 ISO 周用 */
 extern void appToast(const char *msg, uint32_t ms);
 extern bool appRtcWriteUnix(uint32_t ts);
 extern bool appRtcReadUnix(uint32_t *ts);

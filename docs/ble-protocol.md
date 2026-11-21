@@ -1,0 +1,69 @@
+# BLE 配置协议
+
+单服务、单特征、一问一答。手机连上即可读写，不做系统配对绑定；安全性由应用层 6 位 PIN 承担（错 3 次设备会断开并重启服务）。
+
+| 项 | 值 |
+|---|---|
+| 设备名 | `OLED-Panel`（广播名以 `OLED` 开头，便于扫描过滤） |
+| 服务 UUID | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` |
+| 特征 UUID | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
+| 特征属性 | READ / WRITE / WRITE_NR / NOTIFY |
+| MTU | 设备接受 517；**客户端必须等 `onMtuChanged` 再收发**，否则 notify 会被截到 20 字节 |
+
+## 报文
+
+请求（写入特征，UTF-8 JSON）：
+
+```json
+{"pin":"483920","action":"setwifi","params":{"ssid":"MyWiFi","pass":"12345678"}}
+```
+
+响应（notify，UTF-8 JSON）：
+
+```json
+{"ok":true,"action":"setwifi","msg":"已保存","params":{"index":0,"count":1}}
+```
+
+失败统一 `{"ok":false,"action":"...","msg":"中文原因"}`。
+
+单条响应必须塞进一次 notify（MTU 517 → 514 字节），因此列表类接口都要分页。
+
+## 命令总表
+
+| action | 请求 params | 响应 params |
+|---|---|---|
+| `ping` | — | — (`msg`=`pong`) |
+| `get` | — | `ntp` `tz` `wifi_count` `tt_count` `week_parity` |
+| `listwifi` | — | `count` `list:[{ssid,pass}]` |
+| `setwifi` | `ssid` `pass` | `index` `count` |
+| `delwifi` | `ssid` | `count` |
+| `setntp` | `server` `tz`(-12..14) | — |
+| `settime` | `ts`（UTC 秒） | — |
+| `gettime` | — | `ts`（UTC 秒） |
+| `unpair` | — | —（清配对并重启服务，连接会断） |
+| `gettt` | — | `count` `today`(1..7) `week_parity` |
+| `listtt` | `from`(≥0) `count`(1..6，固件实际按 ≤4 截断) | `total` `from` `courses:[{name,day,start,end,parity}]` |
+| `addcourse` | `name`(≤24 字节 UTF-8) `day`(1..7) `start`(0..1439) `end`(0..1439) `parity`(0/1/2) | `index` `count` |
+| `delcourse` | `index` | `count` |
+| `cleartt` | — | `count`(=0) |
+
+## 课表语义
+
+- `day`：1=周一 … 7=周日。
+- `start` / `end`：距当天 00:00 的分钟数，如 8:00 = 480，9:40 = 580。必须 `start < end`。
+- `parity`：0=每周都上，1=单周，2=双周。
+- 单双周按 **ISO 8601 周数**判定：奇数周为单周。设备首次上电 RTC 未校时时按单周处理。
+- 容量：最多 60 条，保存时自动按 (星期, 开始时间) 排序，`index` 以排序后为准。
+- 存储：LittleFS `/tt.json`，改一次写一次，掉电不丢。
+
+## 示例
+
+```
+{"pin":"123456","action":"addcourse","params":{"name":"高等数学","day":3,"start":480,"end":580,"parity":0}}
+{"ok":true,"action":"addcourse","msg":"已保存","params":{"index":2,"count":7}}
+
+{"pin":"123456","action":"listtt","params":{"from":0,"count":4}}
+{"ok":true,"action":"listtt","params":{"total":7,"from":0,"courses":[
+  {"name":"高等数学","day":1,"start":480,"end":580,"parity":0},
+  {"name":"大学英语","day":1,"start":600,"end":690,"parity":1}]}}
+```
