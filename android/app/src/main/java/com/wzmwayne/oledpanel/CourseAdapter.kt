@@ -7,6 +7,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 
 class CourseAdapter(
+    private val onClick: (Course) -> Unit = {},
     private val onLongClick: (Course) -> Unit
 ) : RecyclerView.Adapter<CourseAdapter.VH>() {
 
@@ -39,6 +40,7 @@ class CourseAdapter(
             tvName.text = course.name.ifBlank { "未命名课程" }
             tvMeta.text = course.metaText()
             tvParity.text = course.parityText()
+            itemView.setOnClickListener { onClick(course) }
             itemView.setOnLongClickListener {
                 onLongClick(course)
                 true

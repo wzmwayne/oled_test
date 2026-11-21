@@ -547,20 +547,160 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         val (dialog, view) = showSheet(R.layout.sheet_course_list)
         val status = view.findViewById<TextView>(R.id.tvSheetStatus)
         val recycler = view.findViewById<RecyclerView>(R.id.rvCourses)
-        view.findViewById<MaterialButton>(R.id.btnCloseCourses).setOnClickListener { dialog.dismiss() }
-        view.findViewById<MaterialButton>(R.id.btnAddCourse).setOnClickListener {
-            dialog.dismiss()
-            doAddCourse()
-        }
         recycler.layoutManager = LinearLayoutManager(this)
-        val adapter = CourseAdapter { course ->
-            confirmDeleteCourse(course, dialog, status)
-        }
+
+        /* 本地草稿：增删改都只动这份列表，点「写入设备」才整体覆盖推送 */
+        val draft = ArrayList<Course>()
+
+        lateinit var adapter: CourseAdapter
+        adapter = CourseAdapter(
+            onClick = { c ->
+                val idx = draft.indexOfFirst { it === c }
+                if (idx >= 0) doAddCourse(draft[idx]) { updated ->
+                    draft[idx] = updated.copy(index = idx)
+                    adapter.submit(draft.toList())
+                    status.text = "已修改（未写入）· 共 " + draft.size + " 门"
+                }
+            },
+            onLongClick = { c ->
+                val idx = draft.indexOfFirst { it === c }
+                if (idx >= 0) {
+                    MaterialAlertDialogBuilder(this)
+                        .setTitle("移除课程")
+                        .setMessage("从草稿里移除「" + c.name + "」？")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("移除") { _, _ ->
+                            draft.removeAt(idx)
+                            adapter.submit(draft.toList())
+                            status.text = "已移除（未写入）· 共 " + draft.size + " 门"
+                        }
+                        .show()
+                }
+            }
+        )
         recycler.adapter = adapter
-        view.findViewById<MaterialButton>(R.id.btnFlipParity).setOnClickListener {
-            confirmFlipParity(adapter, status)
+
+        view.findViewById<MaterialButton>(R.id.btnCloseCourses).setOnClickListener { dialog.dismiss() }
+
+        view.findViewById<MaterialButton>(R.id.btnAddCourse).setOnClickListener {
+            doAddCourse(null) { c ->
+                draft.add(c.copy(index = draft.size))
+                adapter.submit(draft.toList())
+                status.text = "已添加（未写入）· 共 " + draft.size + " 门"
+            }
         }
-        loadCourses(adapter, status)
+
+        view.findViewById<MaterialButton>(R.id.btnFlipParity).setOnClickListener {
+            var n = 0
+            for (i in draft.indices) {
+                val p = draft[i].parity
+                if (p == 1 || p == 2) {
+                    draft[i] = draft[i].copy(parity = if (p == 1) 2 else 1)
+                    n++
+                }
+            }
+            adapter.submit(draft.toList())
+            status.text = if (n == 0) "草稿里没有单双周课程" else "已互换 " + n + " 门（未写入）"
+        }
+
+        view.findViewById<MaterialButton>(R.id.btnReloadCourses).setOnClickListener {
+            loadCoursesInto(draft, adapter, status)
+        }
+
+        view.findViewById<MaterialButton>(R.id.btnSaveCourses).setOnClickListener {
+            pushDraft(draft, adapter, status)
+        }
+
+        loadCoursesInto(draft, adapter, status)
+    }
+
+    /** 从设备读整张表填进草稿（不写回设备） */
+    private fun loadCoursesInto(draft: MutableList<Course>, adapter: CourseAdapter, status: TextView) {
+        val pin = requirePin() ?: run { status.text = "请先填写 6 位 PIN"; return }
+        status.text = "正在读取…"
+        fetchCourses(pin, 0, ArrayList(), 0) { list, total, error ->
+            if (error != null) {
+                status.text = "读取失败：" + error
+                return@fetchCourses
+            }
+            draft.clear()
+            draft.addAll(list)
+            adapter.submit(draft.toList())
+            status.text = if (list.isEmpty()) "设备上没有课程，点「添加课程」开始"
+                          else "共 " + total + " 门 · 点按编辑，长按移除"
+        }
+    }
+
+    /** 整体覆盖推送：先清空，再逐条写入，弹窗显示进度 */
+    private fun pushDraft(draft: List<Course>, adapter: CourseAdapter, status: TextView) {
+        val pin = requirePin() ?: return
+
+        if (draft.isEmpty()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("清空课表")
+                .setMessage("草稿是空的，继续会把设备上的课表清空。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清空") { _, _ ->
+                    sendCommand("cleartt") { res, _ ->
+                        toastResult(res)
+                        if (res?.ok == true) {
+                            status.text = "设备课表已清空"
+                            loadCoursesInto(ArrayList(), adapter, status)
+                        }
+                    }
+                }
+                .show()
+            return
+        }
+
+        val dlg = MaterialAlertDialogBuilder(this)
+            .setTitle("写入设备")
+            .setMessage("0 / " + draft.size)
+            .setCancelable(false)
+            .create()
+        dlg.show()
+
+        BleManager.send(pin, "cleartt") { res, _ ->
+            if (res?.ok != true) {
+                if (dlg.isShowing) dlg.dismiss()
+                toast("清空失败：" + (res?.msg ?: "设备无响应"))
+                return@send
+            }
+            pushCourseAt(pin, draft, 0, dlg, adapter, status)
+        }
+    }
+
+    private fun pushCourseAt(
+        pin: String,
+        list: List<Course>,
+        i: Int,
+        dlg: AlertDialog,
+        adapter: CourseAdapter,
+        status: TextView
+    ) {
+        if (isFinishing || !dlg.isShowing) return
+        if (i >= list.size) {
+            dlg.dismiss()
+            toast("已写入 " + list.size + " 门课")
+            status.text = "已写入 " + list.size + " 门"
+            return
+        }
+        val c = list[i]
+        val params = JSONObject()
+            .put("name", c.name)
+            .put("day", c.day)
+            .put("start", c.start)
+            .put("end", c.end)
+            .put("parity", c.parity)
+        BleManager.send(pin, "addcourse", params) { res, _ ->
+            if (res?.ok != true) {
+                if (dlg.isShowing) dlg.dismiss()
+                toast("第 " + (i + 1) + " 门写入失败：" + (res?.msg ?: "设备无响应"))
+                return@send
+            }
+            dlg.setMessage("" + (i + 1) + " / " + list.size)
+            handler.post { pushCourseAt(pin, list, i + 1, dlg, adapter, status) }
+        }
     }
 
     private fun loadCourses(adapter: CourseAdapter, status: TextView) {
@@ -655,7 +795,11 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             .show()
     }
 
-    private fun doAddCourse() {
+    /**
+     * @param edit  非空表示编辑已有课程（仅用于本地草稿模式）
+     * @param onDraft 非空时只回填草稿，不直接写设备 —— 供「编辑后整体推送」使用
+     */
+    private fun doAddCourse(edit: Course? = null, onDraft: ((Course) -> Unit)? = null) {
         val (dialog, view) = showSheet(R.layout.sheet_add_course)
         val tilName = view.findViewById<TextInputLayout>(R.id.tilCourseName)
         val etName = view.findViewById<TextInputEditText>(R.id.etCourseName)
@@ -665,10 +809,11 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         val acDay = view.findViewById<MaterialAutoCompleteTextView>(R.id.acDay)
         val acParity = view.findViewById<MaterialAutoCompleteTextView>(R.id.acParity)
 
-        var selectedDay = 1
-        var selectedParity = 0
-        var startMin = 8 * 60
-        var endMin = 9 * 60 + 40
+        var selectedDay = edit?.day ?: 1
+        var selectedParity = edit?.parity ?: 0
+        var startMin = edit?.start ?: (8 * 60)
+        var endMin = edit?.end ?: (9 * 60 + 40)
+        if (edit != null) etName.setText(edit.name)
 
         etStart.setText(formatMinutes(startMin))
         etEnd.setText(formatMinutes(endMin))
@@ -686,6 +831,13 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         acParity.setText(parityLabels[0], false)
         acParity.setOnClickListener { acParity.showDropDown() }
         acParity.setOnItemClickListener { _, _, position, _ -> selectedParity = position }
+
+        if (edit != null) {
+            acDay.setText(dayLabels[selectedDay - 1], false)
+            acParity.setText(parityLabels[selectedParity], false)
+            etStart.setText(formatMinutes(startMin))
+            etEnd.setText(formatMinutes(endMin))
+        }
 
         etStart.setOnClickListener {
             pickTime(startMin) { value ->
@@ -716,6 +868,12 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                 return@setOnClickListener
             }
             tilEnd.error = null
+
+            if (onDraft != null) {
+                onDraft(Course(edit?.index ?: -1, name, selectedDay, startMin, endMin, selectedParity))
+                dialog.dismiss()
+                return@setOnClickListener
+            }
 
             sendCommand(
                 "addcourse",

@@ -67,6 +67,23 @@
         android:textAllCaps="false" />
 
     <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnSaveCourses"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="写入设备（覆盖整张表）"
+        android:textAllCaps="false" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnReloadCourses"
+        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="从设备重新读取"
+        android:textAllCaps="false" />
+
+    <com.google.android.material.button.MaterialButton
         android:id="@+id/btnCloseCourses"
         style="@style/Widget.MaterialComponents.Button.TextButton"
         android:layout_width="match_parent"
