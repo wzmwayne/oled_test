@@ -1493,6 +1493,10 @@ void setup() {
   logf("\r\n===== 桌面时钟终端 =====\r\n");
   logf("按键 K1=* K2=0 K3=1 K4=#\r\n");
   logf("[调试] CORE_DEBUG_LEVEL=%d（0=关 5=最详细）\r\n", CORE_DEBUG_LEVEL);
+  /* Arduino 的 log_x 已由 CORE_DEBUG_LEVEL=5 打开；这里再把 IDF 组件的运行时
+   * 过滤阈值放到最低。是否真有输出取决于 sdkconfig 的 LOG_MAXIMUM_LEVEL，
+   * 预编译库若在更高级别把它编掉了，这一行不会有额外输出，也无副作用。 */
+  esp_log_level_set("*", ESP_LOG_VERBOSE);
 
   /* 板载 LED：先熄灭，再由 loop 闪 3 秒 */
   pinMode(LED_PIN, OUTPUT);
