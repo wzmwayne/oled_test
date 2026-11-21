@@ -119,6 +119,42 @@ int ttAdd(const char *name, int day, int start, int end, int parity) {
   return pos;
 }
 
+/* 整表替换：先校验再写 gTt，最后统一排序落盘，避免写一半断电 */
+int ttLoadJson(const char *json, size_t len) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, json, len);
+  if (err) return -1;
+
+  JsonArray arr = doc["c"].as<JsonArray>();
+  int k = 0;
+  for (JsonObject o : arr) {
+    if (k >= TT_MAX) break;
+    TtCourse c;
+    memset(&c, 0, sizeof(c));
+    snprintf(c.name, sizeof(c.name), "%s", (const char *)(o["n"] | ""));
+    c.day    = (uint8_t)(o["d"] | 0);
+    c.start  = (uint16_t)(o["s"] | 0);
+    c.end    = (uint16_t)(o["e"] | 0);
+    c.parity = (uint8_t)(o["p"] | 0);
+    if (!c.name[0] || c.day < 1 || c.day > 7) continue;
+    if (c.start >= c.end || c.end > 1439 || c.parity > 2) continue;
+    gTt[k++] = c;
+  }
+  gTtN = k;
+
+  for (int i = 1; i < gTtN; i++) {
+    TtCourse v = gTt[i];
+    int j = i - 1;
+    while (j >= 0 && (gTt[j].day > v.day || (gTt[j].day == v.day && gTt[j].start > v.start))) {
+      gTt[j + 1] = gTt[j];
+      j--;
+    }
+    gTt[j + 1] = v;
+  }
+  ttSave();
+  return gTtN;
+}
+
 bool ttDel(int i) {
   if (i < 0 || i >= gTtN) return false;
   if (i < gTtN - 1)

@@ -1,8 +1,16 @@
 package com.wzmwayne.oledpanel
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.widget.EditText
+import android.widget.PopupMenu
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -37,6 +45,7 @@ class TimetableActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnTtReload).setOnClickListener { load() }
         findViewById<MaterialButton>(R.id.btnTtAdd).setOnClickListener { addCourse(1, 8 * 60) }
         findViewById<MaterialButton>(R.id.btnTtSave).setOnClickListener { save() }
+        findViewById<MaterialButton>(R.id.btnTtMenu).setOnClickListener { showMenu(it) }
 
         load()
     }
@@ -88,6 +97,72 @@ class TimetableActivity : AppCompatActivity() {
         })
     }
 
+    private fun showMenu(anchor: View) {
+        val pop = PopupMenu(this, anchor)
+        pop.menu.add(0, 1, 0, "导出课表")
+        pop.menu.add(0, 2, 1, "导入课表")
+        pop.menu.add(0, 3, 2, "从设备重新读取")
+        pop.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> exportMeta()
+                2 -> importMeta()
+                3 -> load()
+            }
+            true
+        }
+        pop.show()
+    }
+
+    /** 把当前草稿导出成可复制的文本，方便贴给 AI 改 */
+    private fun exportMeta() {
+        val text = TimetableMeta.export(draft)
+        val tv = TextView(this).apply {
+            this.text = text
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            textSize = 11f
+            setPadding(24, 24, 24, 24)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("导出课表（" + draft.size + " 门）")
+            .setView(scroll)
+            .setNegativeButton("关闭", null)
+            .setPositiveButton("复制") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("课表", text))
+                Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
+    /** 粘贴文本直接替换草稿，不碰设备 */
+    private fun importMeta() {
+        val et = EditText(this).apply {
+            hint = "粘贴课表 JSON，如 {\"c\":[{\"n\":\"数学\",\"d\":1,\"s\":\"08:00\",\"e\":\"08:40\",\"p\":0}]}"
+            minLines = 8
+            gravity = Gravity.TOP or Gravity.START
+            textSize = 12f
+            setPadding(24, 24, 24, 24)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("导入课表")
+            .setView(et)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("解析") { _, _ ->
+                val list = TimetableMeta.parse(et.text?.toString().orEmpty())
+                if (list == null) {
+                    Toast.makeText(this, "解析失败：需要 {\"c\":[...]} 结构", Toast.LENGTH_LONG).show()
+                } else {
+                    draft.clear()
+                    draft.addAll(list)
+                    grid.courses = draft.toList()
+                    tvStatus.text = "已导入 " + draft.size + " 门（未写入设备）"
+                }
+            }
+            .show()
+    }
+
     private fun save() {
         if (pin.length != 6) {
             Toast.makeText(this, "没有 PIN", Toast.LENGTH_SHORT).show()
@@ -118,8 +193,8 @@ class TimetableActivity : AppCompatActivity() {
             .create()
         dlg.show()
 
-        CourseSync.push(pin, draft, { done, total ->
-            handler.post { if (dlg.isShowing) dlg.setMessage("$done / $total") }
+        CourseSync.pushJson(pin, TimetableMeta.exportCompact(draft), { done, total ->
+            handler.post { if (dlg.isShowing) dlg.setMessage("$done / $total 片") }
         }) { ok, err ->
             handler.post {
                 if (dlg.isShowing) dlg.dismiss()

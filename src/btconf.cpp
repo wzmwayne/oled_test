@@ -159,6 +159,21 @@ bool btWifiDel(const char *ssid) {
   return true;
 }
 
+/* ==================== 课表整体下发 ====================
+ * 一次 BLE 写放不下整张表，按「追加 → 结束」两段式：
+ *   {"action":"settt","params":{"data":"<JSON 片段>"}}   多次追加
+ *   {"action":"settt","params":{"end":true}}             解析并整表替换
+ *   {"action":"settt","params":{"reset":true}}           丢弃缓冲
+ */
+#define TT_JSON_MAX 4096
+static char    *gTtBuf = nullptr;
+static uint32_t gTtBufLen = 0;
+
+static void ttBufFree() {
+  if (gTtBuf) { free(gTtBuf); gTtBuf = nullptr; }
+  gTtBufLen = 0;
+}
+
 /* ==================== 书籍上传（base64 分块） ==================== */
 #define BOOK_DIR "/books"
 
@@ -403,6 +418,53 @@ static void handleJson(const char *in, size_t len) {
       bool ok = LittleFS.remove(path);
       resp["ok"] = ok;
       resp["msg"] = ok ? "已删除" : "文件不存在";
+    }
+
+  } else if (!strcmp(action, "settt")) {
+    if (params["reset"] | false) {
+      ttBufFree();
+      resp["ok"] = true;
+      resp["msg"] = "缓冲已清空";
+      resp["params"]["len"] = 0;
+    } else if (params["end"] | false) {
+      if (!gTtBuf || gTtBufLen == 0) {
+        resp["ok"] = false;
+        resp["msg"] = "没有收到任何数据";
+      } else {
+        int n = ttLoadJson(gTtBuf, gTtBufLen);
+        if (n < 0) {
+          resp["ok"] = false;
+          resp["msg"] = "JSON 解析失败或格式不对";
+        } else {
+          resp["ok"] = true;
+          resp["msg"] = "课表已整体写入";
+          resp["params"]["count"] = n;
+        }
+        ttBufFree();
+      }
+    } else {
+      const char *chunk = params["data"] | "";
+      size_t clen = strlen(chunk);
+      if (clen == 0) {
+        resp["ok"] = false;
+        resp["msg"] = "空片段";
+      } else {
+        if (!gTtBuf) gTtBuf = (char *)malloc(TT_JSON_MAX);
+        if (!gTtBuf) {
+          resp["ok"] = false;
+          resp["msg"] = "内存不足";
+        } else if (gTtBufLen + clen >= TT_JSON_MAX) {
+          ttBufFree();
+          resp["ok"] = false;
+          resp["msg"] = "课表超过 4KB，请精简课程名或减少条数";
+        } else {
+          memcpy(gTtBuf + gTtBufLen, chunk, clen);
+          gTtBufLen += clen;
+          gTtBuf[gTtBufLen] = 0;
+          resp["ok"] = true;
+          resp["params"]["len"] = gTtBufLen;
+        }
+      }
     }
 
   } else if (!strcmp(action, "gettt")) {

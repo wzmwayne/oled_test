@@ -50,6 +50,63 @@ object CourseSync {
         }
     }
 
+    /**
+     * 整表下发：settt 分片追加，最后 end 提交。
+     * 固件只有「取课表 / 发课表」两条通道，不再逐条 addcourse。
+     */
+    fun pushJson(
+        pin: String,
+        json: String,
+        onProgress: (Int, Int) -> Unit,
+        done: (Boolean, String?) -> Unit
+    ) {
+        val parts = split(json, 300)
+        BleManager.send(pin, "settt", JSONObject().put("reset", true)) { res, _ ->
+            if (res?.ok != true) {
+                done(false, "初始化失败：" + (res?.msg ?: "无响应"))
+                return@send
+            }
+            sendPart(pin, parts, 0, onProgress, done)
+        }
+    }
+
+    private fun sendPart(
+        pin: String,
+        parts: List<String>,
+        i: Int,
+        onProgress: (Int, Int) -> Unit,
+        done: (Boolean, String?) -> Unit
+    ) {
+        if (i >= parts.size) {
+            BleManager.send(pin, "settt", JSONObject().put("end", true)) { res, _ ->
+                if (res?.ok == true) done(true, null)
+                else done(false, res?.msg ?: "提交失败")
+            }
+            return
+        }
+        BleManager.send(pin, "settt", JSONObject().put("data", parts[i])) { res, _ ->
+            if (res?.ok != true) {
+                done(false, "第 " + (i + 1) + " 片发送失败：" + (res?.msg ?: "无响应"))
+                return@send
+            }
+            onProgress(i + 1, parts.size)
+            sendPart(pin, parts, i + 1, onProgress, done)
+        }
+    }
+
+    /** 按字符切片，避免把代理对劈开 */
+    private fun split(s: String, size: Int): List<String> {
+        val out = ArrayList<String>()
+        var i = 0
+        while (i < s.length) {
+            var end = minOf(i + size, s.length)
+            if (end < s.length && Character.isHighSurrogate(s[end - 1])) end--
+            out.add(s.substring(i, end))
+            i = end
+        }
+        return out
+    }
+
     /** 先 cleartt 再逐条 addcourse，等于整张表覆盖 */
     fun push(
         pin: String,

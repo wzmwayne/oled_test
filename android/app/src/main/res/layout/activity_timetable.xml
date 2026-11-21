@@ -36,6 +36,17 @@
             android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnTtMenu"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:text="⋮"
+            android:textAllCaps="false"
+            android:textColor="@color/fg"
+            android:textSize="18sp" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btnTtReload"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="wrap_content"

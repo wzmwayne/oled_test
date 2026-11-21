@@ -27,6 +27,10 @@ void  ttBegin();                                  /* LittleFS 挂载后调用，
 int   ttCount();
 const TtCourse *ttGet(int i);
 
+/* 整表替换：解析 {"c":[{"n","d","s","e","p"}]}，成功返回条数，失败 -1。
+ * 这是「发课表」的唯一入口，解析成功后一次性落盘。 */
+int   ttLoadJson(const char *json, size_t len);
+
 int   ttAdd(const char *name, int day, int start, int end, int parity);
 bool  ttDel(int i);
 void  ttClear();
