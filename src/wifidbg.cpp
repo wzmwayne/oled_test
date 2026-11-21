@@ -302,6 +302,27 @@ static void cmdConn(char *arg) {
 }
 
 /* ---- DNS ---- */
+/* lwIP 没提供 gai_strerror，自己给几个常见码配中文 */
+static const char *dnsErrText(int rc) {
+  if (rc == 0) return "OK";
+#ifdef EAI_NONAME
+  if (rc == EAI_NONAME) return "域名不存在或 DNS 无响应";
+#endif
+#ifdef EAI_AGAIN
+  if (rc == EAI_AGAIN) return "DNS 暂时不可用";
+#endif
+#ifdef EAI_FAIL
+  if (rc == EAI_FAIL) return "DNS 服务器返回失败";
+#endif
+#ifdef EAI_MEMORY
+  if (rc == EAI_MEMORY) return "解析时内存不足";
+#endif
+#ifdef EAI_SERVICE
+  if (rc == EAI_SERVICE) return "服务名不支持";
+#endif
+  return "解析失败";
+}
+
 static bool resolveHost(const char *host, IPAddress *out, uint32_t *ms, int *rc) {
   struct addrinfo hints, *res = NULL;
   memset(&hints, 0, sizeof(hints));
@@ -324,7 +345,7 @@ static void cmdDns(char *arg) {
   if (resolveHost(arg, &ip, &ms, &rc)) {
     appLog("[dns] %s -> %s  (%u ms)\r\n", arg, ip.toString().c_str(), (unsigned)ms);
   } else {
-    appLog("[dns] 解析失败 rc=%d (%s) 耗时 %u ms\r\n", rc, gai_strerror(rc), (unsigned)ms);
+    appLog("[dns] 解析失败 rc=%d (%s) 耗时 %u ms\r\n", rc, dnsErrText(rc), (unsigned)ms);
     appLog("[dns] 检查 DNS 服务器: %s\r\n", WiFi.dnsIP().toString().c_str());
   }
 }
@@ -366,7 +387,7 @@ static void cmdPing(char *arg) {
 
   IPAddress ip; uint32_t ms; int rc;
   if (!resolveHost(host, &ip, &ms, &rc)) {
-    appLog("[ping] 解析 %s 失败 rc=%d (%s)\r\n", host, rc, gai_strerror(rc));
+    appLog("[ping] 解析 %s 失败 rc=%d (%s)\r\n", host, rc, dnsErrText(rc));
     return;
   }
   appLog("[ping] %s -> %s，%d 次，每次超时 2s\r\n", host, ip.toString().c_str(), count);
@@ -446,7 +467,7 @@ static void cmdCurl(char *arg) {
 
   IPAddress ip; uint32_t ms; int rc;
   if (!resolveHost(url.host, &ip, &ms, &rc)) {
-    appLog("[curl] DNS 解析失败 rc=%d (%s)\r\n", rc, gai_strerror(rc));
+    appLog("[curl] DNS 解析失败 rc=%d (%s)\r\n", rc, dnsErrText(rc));
     appLog("[curl] 检查 DNS=%s 或直接换成 IP 试试\r\n", WiFi.dnsIP().toString().c_str());
     return;
   }
@@ -540,7 +561,7 @@ static void cmdNtp(char *arg) {
 
   IPAddress ip; uint32_t ms; int rc;
   if (!resolveHost(srv, &ip, &ms, &rc)) {
-    appLog("[ntp] DNS 解析 %s 失败 rc=%d (%s)\r\n", srv, rc, gai_strerror(rc));
+    appLog("[ntp] DNS 解析 %s 失败 rc=%d (%s)\r\n", srv, rc, dnsErrText(rc));
     return;
   }
   appLog("[ntp] %s -> %s (%u ms)\r\n", srv, ip.toString().c_str(), (unsigned)ms);
