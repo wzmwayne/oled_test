@@ -146,6 +146,7 @@ object BleManager {
         val g = gatt
         if (g == null) {
             setState(State.DISCONNECTED)
+            failPending()
             return
         }
         try {
