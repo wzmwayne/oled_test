@@ -8,7 +8,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.util.Base64
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
@@ -22,6 +25,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.IdRes
 import androidx.annotation.LayoutRes
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -68,6 +72,15 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         }
         action?.invoke()
     }
+
+    /** 选 txt 用系统文件选择器，避免申请全盘存储权限 */
+    private val bookLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) uploadBook(uri)
+    }
+
+    private var uploadAbort = false
 
     private val rssiPoller = object : Runnable {
         override fun run() {
@@ -146,6 +159,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         bindRow(R.id.rowCourseView, "查看课表", "分页读取完整课表") { showCourses() }
         bindRow(R.id.rowCourseAdd, "添加课程", "名称、星期、时间、单双周") { doAddCourse() }
         bindRow(R.id.rowCourseClear, "清空课表", "删除全部课程", danger = true) { confirmClearCourses() }
+        bindRow(R.id.rowBooks, "书籍 / 上传 txt", "查看设备上的书，或从本机选文件上传") { showBooks() }
 
         bindRow(R.id.rowUnpair, "unpair", "清除配对并重新生成 PIN", danger = true) { confirmUnpair() }
     }
@@ -741,6 +755,154 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                 }
             }
             .show()
+    }
+
+    // ---------------- 阅读器 ----------------
+    /** 每包原文 256 字节，base64 后约 342 字符，能塞进一次 BLE 写 */
+    private val uploadChunkBytes = 256
+
+    private fun showBooks() {
+        val (dialog, view) = showSheet(R.layout.sheet_book_list)
+        val status = view.findViewById<TextView>(R.id.tvBookStatus)
+        val recycler = view.findViewById<RecyclerView>(R.id.rvBooks)
+        recycler.layoutManager = LinearLayoutManager(this)
+
+        lateinit var adapter: BookAdapter
+        adapter = BookAdapter { book ->
+            confirmDeleteBook(book, status) { loadBooks(adapter, status) }
+        }
+        recycler.adapter = adapter
+
+        view.findViewById<MaterialButton>(R.id.btnBookClose).setOnClickListener { dialog.dismiss() }
+        view.findViewById<MaterialButton>(R.id.btnBookUpload).setOnClickListener {
+            bookLauncher.launch(arrayOf("text/plain"))
+        }
+        loadBooks(adapter, status)
+    }
+
+    private fun loadBooks(adapter: BookAdapter, status: TextView) {
+        val pin = requirePin() ?: run { status.text = "请先填写 6 位 PIN"; return }
+        status.text = "正在读取…"
+        BleManager.send(pin, "blist") { res, _ ->
+            if (res?.ok != true) {
+                status.text = "读取失败：" + (res?.msg ?: "设备无响应")
+                return@send
+            }
+            val arr = res.params?.optJSONArray("books")
+            val list = ArrayList<Book>()
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    list.add(Book(o.optString("name", ""), o.optLong("size", 0)))
+                }
+            }
+            adapter.submit(list)
+            status.text = if (list.isEmpty()) "设备上还没有书" else "共 " + list.size + " 本"
+        }
+    }
+
+    private fun confirmDeleteBook(book: Book, status: TextView, refresh: () -> Unit) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("删除书籍")
+            .setMessage("确定删除「" + book.name + "」？")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                val pin = requirePin() ?: return@setPositiveButton
+                BleManager.send(pin, "bdel", JSONObject().put("name", book.name)) { res, _ ->
+                    toastResult(res)
+                    if (res?.ok == true) refresh()
+                }
+            }
+            .show()
+    }
+
+    private fun uploadBook(uri: Uri) {
+        val pin = requirePin() ?: return
+        val bytes = try {
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
+        if (bytes == null || bytes.isEmpty()) {
+            toast("读取文件失败或文件为空")
+            return
+        }
+
+        val name = sanitizeBookName(queryDisplayName(uri))
+        val total = (bytes.size + uploadChunkBytes - 1) / uploadChunkBytes
+
+        uploadAbort = false
+        val dlg = MaterialAlertDialogBuilder(this)
+            .setTitle("上传 " + name)
+            .setMessage("0 / " + total + " 块")
+            .setNegativeButton("取消") { _, _ -> uploadAbort = true }
+            .setCancelable(false)
+            .create()
+        dlg.show()
+        uploadChunk(dlg, pin, name, bytes, 0, total)
+    }
+
+    private fun uploadChunk(
+        dlg: AlertDialog,
+        pin: String,
+        name: String,
+        data: ByteArray,
+        index: Int,
+        total: Int
+    ) {
+        if (uploadAbort || isFinishing) {
+            if (dlg.isShowing) dlg.dismiss()
+            return
+        }
+        if (index >= total) {
+            dlg.setMessage("完成，共 " + data.size + " 字节")
+            handler.postDelayed({
+                if (dlg.isShowing) dlg.dismiss()
+                toast("已上传 " + name)
+            }, 500)
+            return
+        }
+
+        val off = index * uploadChunkBytes
+        val len = minOf(uploadChunkBytes, data.size - off)
+        val b64 = Base64.encodeToString(data, off, len, Base64.NO_WRAP)
+        val params = JSONObject().put("name", name).put("off", off).put("data", b64)
+
+        BleManager.send(pin, "bput", params) { res, _ ->
+            if (res?.ok != true) {
+                if (dlg.isShowing) dlg.dismiss()
+                toast("上传失败：" + (res?.msg ?: "设备无响应"))
+                return@send
+            }
+            dlg.setMessage("" + (index + 1) + " / " + total + " 块  (" + (off + len) * 100 / data.size + "%)")
+            handler.post { uploadChunk(dlg, pin, name, data, index + 1, total) }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        var name = "book.txt"
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (i >= 0 && c.moveToFirst()) name = c.getString(i) ?: name
+            }
+        } catch (e: Exception) {
+            // 拿不到名字就用默认值
+        }
+        return name
+    }
+
+    /** 设备端限制：文件名 ≤32 字节，且不能含 / \ : */
+    private fun sanitizeBookName(raw: String): String {
+        var s = raw.replace('/', '_').replace('\\', '_').replace(':', '_').trim()
+        if (s.isEmpty()) s = "book.txt"
+        val b = s.toByteArray(Charsets.UTF_8)
+        if (b.size > 32) {
+            var end = 32
+            while (end > 0 && (b[end].toInt() and 0xC0) == 0x80) end--
+            s = String(b, 0, end, Charsets.UTF_8)
+        }
+        return s
     }
 
     private fun confirmClearCourses() {
