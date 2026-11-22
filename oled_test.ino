@@ -60,6 +60,13 @@ static int gTzHour = 8;
 /* SSD1306 对比度 0x00-0xFF。0xCF 偏亮刺眼，降到 0x7F（手册默认）。
  * 嫌暗就调 0x9F，嫌亮就调 0x5F。 */
 #define OLED_CONTRAST 0x7F
+#define BR_MIN 16
+#define BR_MAX 255
+#define BR_STEP 24
+
+static uint8_t  gContrast    = OLED_CONTRAST;
+static bool     gContrastDirty = false;
+static uint32_t gContrastSaveAt = 0;
 
 #define LED_PIN   8
 #define LED_ON    LOW
@@ -392,6 +399,43 @@ static void drawLoading(const char *title, const char *msg, uint16_t tick) {
     fillRect(px, trackY + 1, px, trackY + trackH - 2);
   }
 }
+/* ---------- 屏幕亮度（对比度 0x81） ---------- */
+static void contrastApply() {
+  oledCmd(0x81);
+  oledCmd(gContrast);
+}
+
+static void contrastLoad() {
+  Preferences p;
+  p.begin("cfg", true);
+  int v = p.getInt("bl", -1);
+  p.end();
+  if (v >= BR_MIN && v <= BR_MAX) gContrast = (uint8_t)v;
+}
+
+static void contrastSave() {
+  Preferences p;
+  p.begin("cfg", false);
+  p.putInt("bl", gContrast);
+  p.end();
+  gContrastDirty = false;
+}
+
+/* 0 键减、1 键加；连按或长按都按步长走，松手 0.7 秒后落盘 */
+static void contrastStep(int dir) {
+  int v = (int)gContrast + dir * BR_STEP;
+  if (v < BR_MIN) v = BR_MIN;
+  if (v > BR_MAX) v = BR_MAX;
+  if (v == (int)gContrast) return;
+  gContrast = (uint8_t)v;
+  contrastApply();
+  gContrastDirty  = true;
+  gContrastSaveAt = millis() + 700;
+  char b[24];
+  snprintf(b, sizeof(b), "亮度 %d%%", gContrast * 100 / 255);
+  appToast(b, 900);
+}
+
 static void drawCenterScaled(int y, const char *s, uint8_t sc) {
   int x = (SCREEN_W - textWidthScaled(s, sc)) / 2;
   drawTextMode(x < 0 ? 0 : x, y, s, sc, true);
@@ -987,6 +1031,11 @@ static void drawBookList() {
   if (first + 3 < n) fillRect(124, 58, 127, 61);
 }
 
+/* 目录选中行的走马灯状态 */
+static char     gTocMqText[48] = {0};
+static int      gTocMqOff = 0;
+static uint32_t gTocMqNext = 0;
+
 static void drawToc() {
   drawTitleBar("目录");
   int n = rdTocCount();
@@ -1001,13 +1050,35 @@ static void drawToc() {
   for (int i = 0; i < 3; i++) {
     int k = first + i;
     if (k >= n) break;
-    char buf[48];
-    fitText(buf, sizeof(buf), rdTocName(k), SCREEN_W - 3);
     int y = ROW1 + i * 16;
+    const char *full = rdTocName(k);
+
     if (k == gTocSel) {
+      /* 选中行（焦点）：放不下就静止 1 秒再横向滚，滚完停 1 秒重来 */
+      int tw = textWidthScaled(full, 1);
+      int x = 2;
+      if (tw > SCREEN_W - 4) {
+        uint32_t now = millis();
+        if (strcmp(gTocMqText, full) != 0) {
+          snprintf(gTocMqText, sizeof(gTocMqText), "%s", full);
+          gTocMqOff = 0;
+          gTocMqNext = now + 1000;
+        }
+        if ((int32_t)(now - gTocMqNext) >= 0) {
+          gTocMqOff += 2;
+          if (gTocMqOff > tw - (SCREEN_W - 4) + 16) { gTocMqOff = 0; gTocMqNext = now + 1000; }
+          else                                      { gTocMqNext = now + 45; }
+        }
+        x = 2 - gTocMqOff;
+      } else {
+        snprintf(gTocMqText, sizeof(gTocMqText), "%s", full);
+        gTocMqOff = 0;
+      }
       fillRect(0, y, SCREEN_W - 1, y + 14);
-      drawTextMode(2, y, buf, 1, false);
+      drawTextMode(x, y, full, 1, false);
     } else {
+      char buf[48];
+      fitText(buf, sizeof(buf), full, SCREEN_W - 3);
       drawText(2, y, buf);
     }
   }
@@ -1015,18 +1086,12 @@ static void drawToc() {
   if (first + 3 < n) fillRect(124, 58, 127, 61);
 }
 
-/* 阅读器里标题行的走马灯状态（和主页那条互不干扰） */
-static char     gRdMqText[80] = {0};
-static int      gRdMqOff = 0;
-static uint32_t gRdMqNext = 0;
-
 static void drawReader() {
   if (gRdView == 2 && rdLoaded()) { drawToc(); return; }
   if (gRdView == 0 || !rdLoaded()) { drawBookList(); return; }
 
   /* 正文：无标题栏，4 行铺满，底部 1px 进度条。
    * 卷/章标题行反白显示；页首那一行是"焦点"，太宽时先停 1 秒再走马灯。 */
-  bool focusUsed = false;
   for (int i = 0; i < RD_LINES; i++) {
     const char *s = rdLine(i);
     int y = i * 15;
@@ -1034,31 +1099,8 @@ static void drawReader() {
 
     if (rdLineLevel(i) == 0) { drawText(0, y, s); continue; }
 
-    int tw = textWidthScaled(s, 1);
-    bool focus = !focusUsed;
-    focusUsed = true;
-
-    int x = 0;
-    if (tw > SCREEN_W && focus) {
-      uint32_t now = millis();
-      if (strcmp(gRdMqText, s) != 0) {          /* 换了一行标题就重新计时 */
-        snprintf(gRdMqText, sizeof(gRdMqText), "%s", s);
-        gRdMqOff = 0;
-        gRdMqNext = now + 1000;
-      }
-      if ((int32_t)(now - gRdMqNext) >= 0) {
-        gRdMqOff += 2;
-        if (gRdMqOff > tw + 20) { gRdMqOff = 0; gRdMqNext = now + 1000; }
-        else                    { gRdMqNext = now + 45; }
-      }
-      x = -gRdMqOff;
-    } else if (tw <= SCREEN_W && strcmp(gRdMqText, s) != 0) {
-      snprintf(gRdMqText, sizeof(gRdMqText), "%s", s);
-      gRdMqOff = 0;
-    }
-
     fillRect(0, y, SCREEN_W - 1, y + 13);
-    drawTextMode(x, y, s, 1, false);
+    drawTextMode(0, y, s, 1, false);
   }
   int w = SCREEN_W * rdPercent() / 100;
   if (w < 1) w = 1;
@@ -1180,6 +1222,8 @@ static void handleKeys() {
   switch (gApp) {
     case APP_HOME:
       if (starS) { screenOff(); break; }      /* 主页短按 * = 息屏 */
+      if (zeroS || zeroR) contrastStep(-1);   /* 0 键调暗 */
+      if (oneS  || oneR)  contrastStep(+1);   /* 1 键调亮 */
       if (hashS) { gScr = SCR_MENU; gMenuSel = 0; }
       break;
 
@@ -1337,7 +1381,9 @@ static void handleCmd(char *cmd) {
     int v = (int)strtol(args, NULL, 0);
     if (v < 0) v = 0;
     if (v > 255) v = 255;
-    oledCmd(0x81); oledCmd((uint8_t)v);
+    gContrast = (uint8_t)v;
+    contrastApply();
+    contrastSave();
     logf("[命令] 对比度设为 0x%02X\r\n", (unsigned)v);
   }
   else if (!strcasecmp(cmd, "loglevel") && args) {
@@ -1408,7 +1454,9 @@ void setup() {
   if (Wire.endTransmission() == 0) gOledAddr = 0x3D;
 
   gOledOk = oledInit();
-  logf("[屏幕] %s @0x%02X\r\n", gOledOk ? "OK" : "失败", gOledAddr);
+  contrastLoad();          /* 先读回上次的亮度，再盖掉初始化里的默认值 */
+  if (gOledOk) contrastApply();
+  logf("[屏幕] %s @0x%02X 亮度 0x%02X\r\n", gOledOk ? "OK" : "失败", gOledAddr, gContrast);
 
   fontMount();          /* 字库从 font 分区 mmap，失败的话屏幕会显示方块 */
 
@@ -1474,6 +1522,8 @@ void loop() {
       digitalWrite(LED_PIN, gLedPhase ? LED_ON : LED_OFF);
     }
   }
+
+  if (gContrastDirty && (int32_t)(now - gContrastSaveAt) >= 0) contrastSave();
 
   if (now - lastRtc >= 1000) { lastRtc = now; rtcTick(); }
 
