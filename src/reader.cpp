@@ -331,12 +331,11 @@ static void buildToc() {
 }
 
 /* ==================== 书目 ==================== */
+/* 只认 .ezzbk：纯文本/二进制没有容器头，正文里出现 0x00、超大单行都会让
+ * 排版和分块读取出问题，干脆收口到唯一格式。转换交给 neobook。 */
 static bool isBook(const char *n) {
   size_t l = strlen(n);
-  if (l < 4) return false;
-  if (!strcasecmp(n + l - 4, ".txt")) return true;
-  if (l > 6 && !strcasecmp(n + l - 6, ".ezzbk")) return true;
-  return false;
+  return (l > 6 && !strcasecmp(n + l - 6, ".ezzbk"));
 }
 
 /* .ezzbk 头里的原始长度；不是 EZZB 就返回文件大小 */

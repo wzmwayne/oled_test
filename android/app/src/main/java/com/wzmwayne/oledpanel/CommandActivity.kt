@@ -808,7 +808,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
 
         view.findViewById<MaterialButton>(R.id.btnBookClose).setOnClickListener { dialog.dismiss() }
         view.findViewById<MaterialButton>(R.id.btnBookUpload).setOnClickListener {
-            bookLauncher.launch(arrayOf("text/plain", "application/octet-stream"))
+            bookLauncher.launch(arrayOf("*/*"))
         }
         loadBooks(adapter, status)
     }
@@ -861,13 +861,15 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             return
         }
 
-        /* ezbk / txt 一律转成 .ezzbk（去图片与封面 + LZ4 分块压缩）再传 */
-        val raw = if (Ezzbk.isEzbk(bytes)) Ezzbk.toRaw(bytes) else bytes
-        if (raw.isEmpty()) {
-            toast("正文为空，可能整本都是图片")
+        /* 只接受已经打包好的 .ezzbk（转换交给 neobook）。
+         * 以前对任意文件都硬压成 ezzbk，二进制塞进去后正文里全是控制字符，
+         * 阅读器排版和分块读取都会出问题。 */
+        val bad = Ezzbk.verifyContainer(bytes)
+        if (bad != null) {
+            toast(bad)
             return
         }
-        val packed = Ezzbk.wrap(raw)
+        val packed = bytes
         val baseName = queryDisplayName(uri).substringBeforeLast('.').ifBlank { "book" }
         val name = sanitizeBookName(baseName + ".ezzbk")
 
@@ -878,7 +880,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             if (free >= 0 && free < need) {
                 toast("设备空间不足：剩余 " + free / 1024 + " KB，需要 " + need / 1024 + " KB")
             } else {
-                toast("压缩后 " + packed.size / 1024 + " KB（原文 " + raw.size / 1024 + " KB）")
+                toast("准备上传 " + packed.size / 1024 + " KB（已校验 ezzbk 容器）")
                 startUpload(pin, name, packed, free)
             }
         }

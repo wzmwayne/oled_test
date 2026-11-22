@@ -154,7 +154,8 @@ static bool bookNameOk(const char *n) {
   for (const char *p = n; *p; p++) {
     if (*p == '/' || *p == '\\' || *p == ':') return false;
   }
-  return true;
+  size_t l = strlen(n);
+  return (l > 6 && !strcasecmp(n + l - 6, ".ezzbk"));   /* 只收 .ezzbk */
 }
 
 /* 本地星期 1..7（周一=1，周日=7），课表按这个编号存 */
