@@ -73,6 +73,7 @@ object BulkUpload {
     fun start(pin: String, fileName: String, data: ByteArray, cb: Callback) {
         Thread {
             var failAt = 0
+            var accepted = false
             try {
                 val total = data.size
                 val totalHash = fnv(-2128831035, data, 0, total)
@@ -92,6 +93,7 @@ object BulkUpload {
                 }
                 var chunk = open.params?.optInt("chunk", 32768) ?: 32768
                 if (chunk < 4096) chunk = 32768
+                if (BleManager.currentMtu < 200 && chunk > 8192) chunk = 8192
 
                 var sent = 0
                 var sentHash = -2128831035
@@ -101,22 +103,30 @@ object BulkUpload {
                 val t0 = System.currentTimeMillis()
                 var lastReport = t0
 
+                /* 单包上限 = 协商 MTU - 3。写 512 字节而 MTU 只有 247 时，
+                 * Android 直接返回失败，表现就是"连接已断开"。 */
+                val pkt = (BleManager.currentMtu - 3).coerceIn(20, 512)
+
                 while (sent < total) {
                     val segEnd = minOf(sent + chunk, total)
-                    /* 段内按 512 字节切片，纯写不等应答 */
                     var off = sent
                     var pkts = 0
                     while (off < segEnd) {
-                        val n = minOf(512, segEnd - off)
+                        val n = minOf(pkt, segEnd - off)
                         val piece = data.copyOfRange(off, off + n)
-                        if (!BleManager.bulkWrite(piece)) {
-                            finish(cb, false, "连接已断开", off)
-                            return@Thread
+                        var tries = 0
+                        while (!BleManager.bulkWrite(piece)) {
+                            /* 队列满会短暂失败，退让一下重试，别一失败就报断线 */
+                            if (++tries >= 60 || BleManager.state != BleManager.State.CONNECTED) {
+                                finish(cb, false,
+                                    "写入失败（MTU " + BleManager.currentMtu + "，第 " + off + " 字节）", off)
+                                return@Thread
+                            }
+                            Thread.sleep(5)
                         }
                         sentHash = fnv(sentHash, data, off, n)
                         off += n
                         pkts++
-                        /* 每 8 包让一下，避免把设备侧缓冲打满 */
                         if (pkts % 8 == 0) Thread.sleep(3)
                     }
                     sent = segEnd
@@ -156,11 +166,13 @@ object BulkUpload {
                 val close = cmd(pin, "bclose",
                     JSONObject().put("size", total).put("hash", totalHash), 20000)
                 val ok = close?.ok == true
+                accepted = ok
                 finish(cb, ok, close?.msg ?: if (ok) "完成" else "设备无响应", total)
             } catch (e: Exception) {
                 finish(cb, false, "传输异常：" + (e.message ?: ""), failAt)
             } finally {
                 BleManager.onBulkAck = null
+                if (!accepted) cmd(pin, "bcancel", null, 5000)   /* 让设备把半截文件删掉 */
             }
         }.start()
     }

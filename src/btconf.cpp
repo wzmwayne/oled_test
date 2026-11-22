@@ -390,15 +390,39 @@ static void handleJson(const char *in, size_t len) {
       }
     }
 
+  } else if (!strcmp(action, "bcancel")) {
+    /* 手机中途放弃：关句柄并把半截文件删掉，别占着空间也别卡住后面的删除 */
+    if (gUpFile) {
+      bulkClose();
+      char bp[64];
+      snprintf(bp, sizeof(bp), BOOK_DIR "/%s", gUpName);
+      LittleFS.remove(bp);
+      resp["msg"] = "已取消";
+    } else {
+      resp["msg"] = "没有进行中的上传";
+    }
+    gUpName[0] = 0;
+    gUpLen = 0;
+    gUpAckLen = 0;
+    resp["ok"] = true;
+
   } else if (!strcmp(action, "bdel")) {
     const char *name = params["name"] | "";
     if (!bookNameOk(name)) {
       resp["ok"] = false;
       resp["msg"] = "文件名不合法";
     } else {
+      /* 上次上传中途失败会把文件句柄占着，LittleFS 不肯删，先放开 */
+      if (gUpFile) {
+        bulkClose();
+        gUpName[0] = 0;
+        gUpLen = 0;
+        gUpAckLen = 0;
+      }
       char path[64];
       snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
       bool ok = LittleFS.remove(path);
+      if (!ok && !LittleFS.exists(path)) ok = true;   /* 已经不在了也算成功 */
       if (ok) rdForget(name);      /* 文件没了，阅读进度也一并清掉 */
       resp["ok"] = ok;
       resp["msg"] = ok ? "已删除" : "文件不存在";
