@@ -5,21 +5,28 @@
 做三件事：
   1. 剥掉 @image / @cover / @blob 与 --- 分隔（设备不显示图片）
   2. 正文去掉行首反斜杠，保留 # / ## 标题行给目录用
-  3. 每 4096 字节一块做 LZ4 压缩，输出可直接给固件顺序/随机读取
+  3. 每 16384 字节一块做 raw deflate 压缩，输出可直接给固件随机读取
 
-.ezzbk 布局（小端）:
-  "EZB1" | u32 rawSize | u32 blockSize | u32 blockCount
+.ezzbk 布局（小端，v2）:
+  "EZZB" | u8 algo | u8 flags | u16 reserved
+  | u32 rawSize | u32 blockSize | u32 blockCount
   | u32 off[blockCount+1] | block0 ... blockN
+
+  algo 0 = LZ4，1 = raw deflate（16KB 窗口）。默认输出 deflate。
 
 用法:
   python3 tools/ezbk2ezzbk.py book.ezbk -o book.ezzbk
-  python3 tools/ezbk2ezzbk.py book.txt  -o book.ezzbk
+  python3 tools/ezbk2ezzbk.py book.txt  -o book.ezzbk --lz4
 """
 import struct
 import sys
+import zlib
 
 MAGIC = b'EZZB'
 BLOCK = 16384
+ALGO_LZ4 = 0
+ALGO_DEFLATE = 1
+HDR = 20
 
 
 def parse_ezbk(data: bytes):
@@ -145,16 +152,35 @@ def lz4_decompress(src: bytes, out_size: int) -> bytes:
     return bytes(out)
 
 
-def build_ezb(raw: bytes) -> bytes:
-    blocks = [lz4_block(raw[i:i + BLOCK]) for i in range(0, len(raw), BLOCK)]
+def deflate_block(src: bytes) -> bytes:
+    c = zlib.compressobj(9, zlib.DEFLATED, -14)   # raw deflate，16KB 窗口
+    return c.compress(src) + c.flush()
+
+
+def encode_block(src: bytes, algo: int) -> bytes:
+    return deflate_block(src) if algo == ALGO_DEFLATE else lz4_block(src)
+
+
+def decode_block(src: bytes, out_size: int, algo: int) -> bytes:
+    if algo == ALGO_DEFLATE:
+        out = zlib.decompress(src, -14)
+        if out_size and len(out) != out_size:
+            raise SystemExit('deflate 解压长度不符: %d != %d' % (len(out), out_size))
+        return out
+    return lz4_decompress(src, out_size)
+
+
+def build_ezb(raw: bytes, algo: int = ALGO_DEFLATE) -> bytes:
+    blocks = [encode_block(raw[i:i + BLOCK], algo) for i in range(0, len(raw), BLOCK)]
     if not blocks:
-        blocks = [lz4_block(b'')]
+        blocks = [encode_block(b'', algo)]
     n = len(blocks)
-    header_len = 16 + 4 * (n + 1)
+    header_len = HDR + 4 * (n + 1)
     offs = [header_len]
     for b in blocks:
         offs.append(offs[-1] + len(b))
-    head = MAGIC + struct.pack('<III', len(raw), BLOCK, n)
+    head = MAGIC + bytes([algo & 0xFF, 0, 0, 0])
+    head += struct.pack('<III', len(raw), BLOCK, n)
     head += b''.join(struct.pack('<I', o) for o in offs)
     return head + b''.join(blocks)
 
@@ -176,20 +202,23 @@ def main(argv):
         raw = data
         print('纯文本')
 
+    algo = ALGO_LZ4 if '--lz4' in argv else ALGO_DEFLATE
+
     # 校验往返
-    ezb = build_ezb(raw)
+    ezb = build_ezb(raw, algo)
     back = bytearray()
-    n = struct.unpack_from('<I', ezb, 12)[0]
-    offs = struct.unpack_from('<%dI' % (n + 1), ezb, 16)
+    raw_size, _bs, n = struct.unpack_from('<III', ezb, 8)
+    offs = struct.unpack_from('<%dI' % (n + 1), ezb, HDR)
     for k in range(n):
         blk = ezb[offs[k]:offs[k + 1]]
-        want = min(BLOCK, len(raw) - k * BLOCK)
-        back += lz4_decompress(blk, want)
-    assert bytes(back) == raw, 'LZ4 往返不一致'
+        want = min(BLOCK, raw_size - k * BLOCK)
+        back += decode_block(blk, want, algo)
+    assert bytes(back) == raw, '往返不一致'
 
     open(dst, 'wb').write(ezb)
-    print('原文 %d B -> %d B (%.0f%%)  块数 %d  -> %s' %
-          (len(raw), len(ezb), len(ezb) * 100.0 / max(1, len(raw)), n, dst))
+    print('原文 %d B -> %d B (%.1f%%)  块数 %d  algo=%s  -> %s' %
+          (len(raw), len(ezb), len(ezb) * 100.0 / max(1, len(raw)), n,
+           'deflate' if algo == ALGO_DEFLATE else 'lz4', dst))
 
 
 if __name__ == '__main__':

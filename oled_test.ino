@@ -875,8 +875,9 @@ static void drawBtConf() {
 }
 
 /* ---------------- 阅读器 ---------------- */
-static int gRdView = 0;   /* 0=书目 1=正文 */
+static int gRdView = 0;   /* 0=书目 1=正文 2=目录 */
 static int gRdSel  = 0;
+static int gTocSel = 0;
 
 /* 按像素宽度截断，超出补省略号（不切断 UTF-8） */
 static void fitText(char *dst, size_t dn, const char *src, int maxW) {
@@ -935,7 +936,36 @@ static void drawBookList() {
   if (first + 3 < n) fillRect(124, 58, 127, 61);
 }
 
+static void drawToc() {
+  drawTitleBar("目录");
+  int n = rdTocCount();
+  if (n == 0) {
+    drawCenter(ROW2, "这本书没有目录");
+    return;
+  }
+  if (gTocSel >= n) gTocSel = n - 1;
+  if (gTocSel < 0)  gTocSel = 0;
+
+  int first = (gTocSel >= 3) ? gTocSel - 2 : 0;
+  for (int i = 0; i < 3; i++) {
+    int k = first + i;
+    if (k >= n) break;
+    char buf[48];
+    fitText(buf, sizeof(buf), rdTocName(k), SCREEN_W - 3);
+    int y = ROW1 + i * 16;
+    if (k == gTocSel) {
+      fillRect(0, y, SCREEN_W - 1, y + 14);
+      drawTextMode(2, y, buf, 1, false);
+    } else {
+      drawText(2, y, buf);
+    }
+  }
+  if (first > 0)     fillRect(124, 2, 127, 5);
+  if (first + 3 < n) fillRect(124, 58, 127, 61);
+}
+
 static void drawReader() {
+  if (gRdView == 2 && rdLoaded()) { drawToc(); return; }
   if (gRdView == 0 || !rdLoaded()) { drawBookList(); return; }
 
   /* 正文：无标题栏，4 行铺满，底部 1px 进度条 */
@@ -1390,15 +1420,26 @@ static void handleKeys() {
         if ((zeroS || zeroR) && gRdSel > 0)     gRdSel--;
         if ((oneS  || oneR)  && gRdSel < n - 1) gRdSel++;
         if (hashS && n > 0) {
-          if (rdOpenIndex(gRdSel)) gRdView = 1;
+          if (rdOpenIndex(gRdSel)) { gRdView = 1; gTocSel = 0; }
           else appToast("打开失败", 1500);
         }
         if (starS) goHome();
+      } else if (gRdView == 2) {
+        /* 目录：0/1 长按连续翻，短按 # 跳转，* 回正文 */
+        int n = rdTocCount();
+        if ((zeroS || zeroR) && gTocSel > 0)     gTocSel--;
+        if ((oneS  || oneR)  && gTocSel < n - 1) gTocSel++;
+        if (hashS) {
+          if (rdGotoToc(gTocSel)) gRdView = 1;
+          else appToast("跳转失败", 1500);
+        }
+        if (starS) gRdView = 1;
       } else {
-        /* 正文：0/1 翻页，短按 # 或 * 回书目 */
+        /* 正文：0/1 翻页，# 目录，* 回书目 */
         if (oneS  || oneR)  rdNext();
         if (zeroS || zeroR) rdPrev();
-        if (hashS || starS) { rdSaveProgress(); gRdView = 0; rdScan(); }
+        if (hashS) { if (rdTocCount() > 0) gRdView = 2; else appToast("无目录", 1200); }
+        if (starS) { rdSaveProgress(); gRdView = 0; rdScan(); }
       }
       break;
 

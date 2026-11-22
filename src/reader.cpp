@@ -11,6 +11,10 @@
 
 #include "reader.h"
 
+/* ESP32-C3 ROM 里自带 miniz 的 tinfl（esp32c3.rom.ld: tinfl_decompress @0x400000f4），
+   用它解 algo=1 的 raw deflate 块，不占 flash。头文件在 esp_rom/include。 */
+#include "miniz.h"
+
 extern void appLog(const char *fmt, ...);
 extern int  appCpWidth(uint32_t cp);     /* 主固件：字库里的字宽，缺字 8px */
 
@@ -35,8 +39,9 @@ static uint8_t  gBuf[RD_BUF_SIZE];
 static uint32_t gBufPos = 0;
 static int      gBufLen = 0;
 
-/* .ezb：LZ4 分块压缩容器 */
+/* EZZB 分块压缩容器：algo 0=LZ4，1=raw deflate */
 static bool      gEzb = false;
+static uint8_t   gAlgo   = 0;
 static uint32_t  gBlkSize = EZB_BLOCK;
 static uint32_t  gBlkCount = 0;
 static uint32_t *gBlkOff = nullptr;
@@ -44,6 +49,7 @@ static uint8_t   gBlk[EZB_BLOCK];
 static uint32_t  gBlkLen = 0;
 static int32_t   gBlkCur = -1;
 static uint8_t   gBlkIn[EZB_BLOCK + 256];
+static tinfl_decompressor *gTinf = nullptr;   /* 按需 malloc，约 11KB */
 
 /* 目录 */
 static uint32_t gTocOff[RD_TOC_MAX];
@@ -128,6 +134,21 @@ static int lz4Decode(const uint8_t *src, int srcLen, uint8_t *dst, int dstCap) {
   return o;
 }
 
+/* raw deflate 块解压，走 ROM 里的 tinfl（miniz）。
+   每块独立 flush，因此输出缓冲不必回卷。 */
+static int inflateRaw(const uint8_t *src, int srcLen, uint8_t *dst, int dstCap) {
+  if (!gTinf) {
+    gTinf = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor));
+    if (!gTinf) { appLog("[阅读] tinfl 状态分配失败\r\n"); return -1; }
+  }
+  tinfl_init(gTinf);
+  size_t inLen = (size_t)srcLen, outLen = (size_t)dstCap;
+  tinfl_status st = tinfl_decompress(gTinf, src, &inLen, dst, dst, &outLen,
+                                     TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+  if (st != TINFL_STATUS_DONE) return -1;
+  return (int)outLen;
+}
+
 static bool loadBlock(uint32_t idx) {
   if (!gEzb) return false;
   if ((int32_t)idx == gBlkCur && gBlkLen > 0) return true;
@@ -139,7 +160,8 @@ static bool loadBlock(uint32_t idx) {
   if (!gFile.seek(off)) return false;
   if ((uint32_t)gFile.read(gBlkIn, len) != len) return false;
 
-  int n = lz4Decode(gBlkIn, (int)len, gBlk, sizeof(gBlk));
+  int n = (gAlgo == 1) ? inflateRaw(gBlkIn, (int)len, gBlk, sizeof(gBlk))
+                       : lz4Decode(gBlkIn, (int)len, gBlk, sizeof(gBlk));
   if (n < 0) return false;
   gBlkLen = (uint32_t)n;
   gBlkCur = (int32_t)idx;
@@ -428,6 +450,7 @@ static void closeCurrent() {
   if (gOpen) { gFile.close(); }
   if (gBlkOff) { free(gBlkOff); gBlkOff = nullptr; }
   gEzb = false;
+  gAlgo = 0;
   gBlkCount = 0;
   gBlkCur = -1;
   gTocN = 0;
@@ -456,6 +479,7 @@ bool rdOpenIndex(int i) {
   /* 判断是不是 .ezb 压缩容器 */
   if (gBlkOff) { free(gBlkOff); gBlkOff = nullptr; }
   gEzb = false;
+  gAlgo = 0;
   gBlkCount = 0;
   gBlkSize = EZB_BLOCK;
   gSize = (uint32_t)gFile.size();
@@ -463,32 +487,63 @@ bool rdOpenIndex(int i) {
   uint8_t magic[4] = {0};
   gFile.seek(0);
   if (gFile.read(magic, 4) == 4 && !memcmp(magic, "EZZB", 4)) {
-    uint32_t hdr[3] = {0, 0, 0};
-    gFile.seek(4);
-    if (gFile.read((uint8_t *)hdr, 12) == 12) {
-      uint32_t raw = hdr[0], bs = hdr[1], cnt = hdr[2];
-      if (bs > 0 && bs <= EZB_BLOCK && cnt > 0 && cnt <= 4096) {
-        gBlkOff = (uint32_t *)malloc((cnt + 1) * sizeof(uint32_t));
-        if (gBlkOff) {
-          gFile.seek(16);
-          if (gFile.read((uint8_t *)gBlkOff, (cnt + 1) * sizeof(uint32_t)) ==
-              (int)((cnt + 1) * sizeof(uint32_t))) {
-            gEzb = true;
-            gBlkSize = bs;
-            gBlkCount = cnt;
-            gSize = raw;
-          } else {
-            free(gBlkOff);
-            gBlkOff = nullptr;
-          }
-        }
+    /* v2: "EZZB"|algo|flags|rsv(2)|rawSize|blockSize|blockCount|off[n+1]  头 20B
+       旧: "EZZB"|rawSize|blockSize|blockCount|off[n+1]                   头 16B
+       两者靠 off[0]/off[n] 与文件长度对账区分（rawSize 低字节可能恰好是 0/1，不可靠）。 */
+    uint8_t h[20] = {0};
+    gFile.seek(0);
+    int hn = gFile.read(h, 20);
+    const uint32_t fsz = (uint32_t)gFile.size();
+
+    bool ok = false;
+    for (int pass = 0; pass < 2 && !ok; pass++) {
+      uint32_t n_algo, raw, bs, cnt, hdrLen;
+      if (pass == 0) {                       /* 新布局 */
+        if (hn < 20) continue;
+        n_algo = h[4];
+        raw = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+        bs  = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+        cnt = (uint32_t)h[16] | ((uint32_t)h[17] << 8) | ((uint32_t)h[18] << 16) | ((uint32_t)h[19] << 24);
+        hdrLen = 20;
+        if (n_algo > 1) continue;
+      } else {                               /* 旧布局，只支持 LZ4 */
+        if (hn < 16) continue;
+        n_algo = 0;
+        raw = (uint32_t)h[4] | ((uint32_t)h[5] << 8) | ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+        bs  = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+        cnt = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+        hdrLen = 16;
       }
+      if (bs == 0 || bs > EZB_BLOCK || cnt == 0 || cnt > 4096 || raw == 0) continue;
+      if (hdrLen + 4 * (cnt + 1) > fsz) continue;
+
+      uint32_t *off = (uint32_t *)malloc((cnt + 1) * sizeof(uint32_t));
+      if (!off) continue;
+      gFile.seek(hdrLen);
+      if (gFile.read((uint8_t *)off, (cnt + 1) * sizeof(uint32_t)) !=
+          (int)((cnt + 1) * sizeof(uint32_t))) {
+        free(off);
+        continue;
+      }
+      /* 对账：首块紧跟头部，末块正好落在文件尾 */
+      if (off[0] != hdrLen + 4 * (cnt + 1) || off[cnt] != fsz) { free(off); continue; }
+
+      gBlkOff = off;
+      gAlgo = (uint8_t)n_algo;
+      gBlkSize = bs;
+      gBlkCount = cnt;
+      gSize = raw;
+      gEzb = true;
+      ok = true;
     }
+
     if (!gEzb) {
       appLog("[阅读] %s 是 EZZB 但头部损坏\r\n", gName);
       gFile.close();
       return false;
     }
+    appLog("[阅读] EZZB algo=%s 块=%u 块数=%u\r\n",
+           gAlgo == 1 ? "deflate" : "lz4", (unsigned)gBlkSize, (unsigned)gBlkCount);
   }
 
   gOpen = true;
