@@ -63,6 +63,7 @@ static int      gHistN = 0;
 static char     gBooks[RD_BOOK_MAX][RD_NAME_MAX];
 static uint32_t gBookSize[RD_BOOK_MAX];
 static uint32_t gBookPos[RD_BOOK_MAX];
+static uint32_t gBookRaw[RD_BOOK_MAX];   /* 未压缩长度：ezzbk 用头部里的 rawSize，txt 就是文件大小 */
 static int      gBookN = 0;
 
 /* ==================== 进度表（name -> offset） ==================== */
@@ -225,33 +226,19 @@ static int utf8Put(char *dst, uint32_t cp) {
   return 4;
 }
 
-static bool noStart(uint32_t c) {
-  switch (c) {
-    case 0xFF0C: case 0x3002: case 0xFF01: case 0xFF1F: case 0x3001:
-    case 0xFF1B: case 0xFF1A: case 0x300D: case 0x300F: case 0x3011:
-    case 0xFF09: case 0x300B: case 0x3015: case 0x2026: case 0xFF5D:
-      return true;
-  }
-  return false;
-}
-static bool noEnd(uint32_t c) {
-  switch (c) {
-    case 0x300C: case 0x300E: case 0x3010: case 0xFF08: case 0x300A:
-    case 0x3014: case 0xFF5B:
-      return true;
-  }
-  return false;
-}
-
 /* ==================== 排版 ==================== */
+/* 排版：只按像素宽度折行，不做标点避头尾。
+ *
+ * 关键：宽度不够时「不消费」当前这个字（p 不动）直接换行，
+ * 下一页就从它开始——既不重复也不丢字。
+ * 旧实现会把 p 回退到上一字的起点，于是行尾那个字在下一页又出现一次，
+ * 也就是看到的重字。 */
 static uint32_t layout(uint32_t start) {
   uint32_t pos = start;
 
   for (int li = 0; li < RD_LINES; li++) {
     char *out = gLines[li];
     int n = 0, w = 0;
-    uint32_t lastBreak = 0;
-    bool hasBreak = false;
     uint32_t p = pos;
 
     while (p < gSize) {
@@ -279,13 +266,7 @@ static uint32_t layout(uint32_t start) {
       }
 
       int gw = appCpWidth(cp);
-      if (w + gw > RD_WIDTH && w > 0) {
-        if (hasBreak && lastBreak > pos) p = lastBreak;
-        break;
-      }
-
-      if (cp == ' ')                              { lastBreak = nx; hasBreak = true; }
-      else if (!noStart(cp) && !noEnd(cp))        { lastBreak = p;  hasBreak = true; }
+      if (w + gw > RD_WIDTH && w > 0) break;   /* 放不下：本行到此为止，字留在 p */
 
       if (n + 5 < RD_LINE_BYTES) n += utf8Put(out + n, cp);
       w += gw;
@@ -295,7 +276,7 @@ static uint32_t layout(uint32_t start) {
     out[n] = 0;
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
 
-    if (p <= pos) {
+    if (p <= pos) {                       /* 一个字都没排进去，收工 */
       pos = p;
       for (int k = li + 1; k < RD_LINES; k++) gLines[k][0] = 0;
       break;
@@ -358,6 +339,19 @@ static bool isBook(const char *n) {
   return false;
 }
 
+/* .ezzbk 头里的原始长度；不是 EZZB 就返回文件大小 */
+static uint32_t bookRawSize(File &f) {
+  uint32_t fsz = (uint32_t)f.size();
+  uint32_t save = f.position();
+  uint8_t  h[20];
+  f.seek(0);
+  int n = f.read(h, 20);
+  f.seek(save);
+  if (n == 20 && !memcmp(h, "EZZB", 4))
+    return (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+  return fsz;
+}
+
 void rdScan() {
   gBookN = 0;
 
@@ -375,6 +369,8 @@ void rdScan() {
         if (isBook(base)) {
           snprintf(gBooks[gBookN], RD_NAME_MAX, "%s", base);
           gBookSize[gBookN] = (uint32_t)f.size();
+          gBookRaw[gBookN]  = bookRawSize(f);
+          if (gBookRaw[gBookN] == 0) gBookRaw[gBookN] = gBookSize[gBookN];
           gBookN++;
         }
       }
@@ -387,17 +383,20 @@ void rdScan() {
   /* 按名字排序，列表位置才稳定 */
   for (int i = 1; i < gBookN; i++) {
     char tn[RD_NAME_MAX];
-    uint32_t ts;
+    uint32_t ts, tr;
     snprintf(tn, sizeof(tn), "%s", gBooks[i]);
     ts = gBookSize[i];
+    tr = gBookRaw[i];
     int j = i - 1;
     while (j >= 0 && strcmp(gBooks[j], tn) > 0) {
       snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", gBooks[j]);
       gBookSize[j + 1] = gBookSize[j];
+      gBookRaw[j + 1]  = gBookRaw[j];
       j--;
     }
     snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", tn);
     gBookSize[j + 1] = ts;
+    gBookRaw[j + 1]  = tr;
   }
 
   /* 进度：只保留还在的书，孤儿进度直接删 */
@@ -405,7 +404,7 @@ void rdScan() {
   JsonObject m = doc["m"].as<JsonObject>();
   for (int i = 0; i < gBookN; i++) {
     uint32_t pos = (uint32_t)(m[gBooks[i]] | 0u);
-    if (pos >= gBookSize[i]) pos = 0;
+    if (pos >= gBookRaw[i]) pos = 0;     /* 用未压缩长度判断，ezzbk 才不会误清 */
     gBookPos[i] = pos;
   }
   {
@@ -430,8 +429,7 @@ void rdScan() {
   appLog("[阅读] 书目 %d 本\r\n", gBookN);
   for (int i = 0; i < gBookN; i++)
     appLog("[阅读]   %d) %s  %u B  %d%%\r\n", i, gBooks[i],
-           (unsigned)gBookSize[i],
-           gBookSize[i] ? (int)((uint64_t)gBookPos[i] * 100 / gBookSize[i]) : 0);
+           (unsigned)gBookSize[i], rdBookPercent(i));
 }
 
 int rdBookCount() { return gBookN; }
@@ -441,8 +439,9 @@ const char *rdBookName(int i) {
 }
 
 int rdBookPercent(int i) {
-  if (i < 0 || i >= gBookN || gBookSize[i] == 0) return 0;
-  return (int)((uint64_t)gBookPos[i] * 100 / gBookSize[i]);
+  if (i < 0 || i >= gBookN || gBookRaw[i] == 0) return 0;
+  uint64_t pct = (uint64_t)gBookPos[i] * 100 / gBookRaw[i];
+  return pct > 100 ? 100 : (int)pct;
 }
 
 /* ==================== 打开 / 关闭 ==================== */
@@ -609,9 +608,19 @@ bool rdGotoToc(int i) {
   return true;
 }
 
+/* 历史是环形的前进记录：满了就把最老的一条挤掉。
+ * 旧写法在装满 64 条后就不再记录，于是读到第 100 页按上一页会跳回第 64 页。 */
+static void histPush(uint32_t off) {
+  if (gHistN == RD_HIST_MAX) {
+    memmove(gHist, gHist + 1, sizeof(gHist[0]) * (RD_HIST_MAX - 1));
+    gHistN--;
+  }
+  gHist[gHistN++] = off;
+}
+
 void rdNext() {
   if (!gOpen || gEnd >= gSize) return;
-  if (gHistN < RD_HIST_MAX) gHist[gHistN++] = gStart;
+  histPush(gStart);
   gStart = gEnd;
   layout(gStart);
   rdSaveProgress();
@@ -620,22 +629,21 @@ void rdNext() {
 void rdPrev() {
   if (!gOpen) return;
 
-  if (gHistN == 0) {
+  if (gHistN > 0) {
+    gStart = gHist[--gHistN];
+  } else {
+    /* 刚打开书时没有历史：从头翻到上一页（不往历史里塞东西） */
     if (gStart == 0) return;
-    uint32_t target = gStart;
-    gHistN = 0;
-    gStart = 0;
-    layout(0);
-    while (gEnd < target && gEnd < gSize) {
-      if (gHistN < RD_HIST_MAX) gHist[gHistN++] = gStart;
-      gStart = gEnd;
-      layout(gStart);
+    uint32_t target = gStart, prev = 0, cur = 0;
+    while (cur < target && cur < gSize) {
+      prev = cur;
+      gStart = cur;
+      uint32_t nx = layout(cur);
+      if (nx <= cur) break;              /* 防御：不前进就停 */
+      cur = nx;
     }
-    if (gHistN == 0) return;
+    gStart = prev;
   }
-
-  gHistN--;
-  gStart = gHist[gHistN];
   layout(gStart);
   rdSaveProgress();
 }

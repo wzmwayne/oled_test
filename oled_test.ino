@@ -24,7 +24,6 @@
 #include "src/font_wqy14.h"
 #include "src/btconf.h"
 #include "src/timetable.h"
-#include "src/wifiap.h"
 #include "src/reader.h"
 #include <time.h>
 #include <Preferences.h>
@@ -545,7 +544,7 @@ static void tdStopClear() { gTdRun = false; gTdTotal = 0; wakeLockRelease(WL_TIM
 /* ==================== 界面状态 ==================== */
 enum AppId {
   APP_HOME = 0, APP_PRECISE, APP_STOPWATCH, APP_TIMER, APP_SCHEDULE,  /* 菜单可见 */
-  APP_READER, APP_BTCONF, APP_WEBAP,                                   /* 隐藏，靠 ID 进 */
+  APP_READER, APP_BTCONF,                                            /* 隐藏，靠 ID 进 */
   APP_COUNT
 };
 #define MENU_COUNT 5          /* 菜单只列前 5 项 */
@@ -554,7 +553,7 @@ enum Screen { SCR_APP, SCR_MENU, SCR_ID };
 
 static const char *APP_NAME[APP_COUNT] = {
   "主页", "精确时钟", "正计时", "倒计时", "课表",
-  "阅读器", "蓝牙配置", "WiFi 配置"
+  "阅读器", "蓝牙配置"
 };
 
 static int      gApp = APP_HOME;
@@ -865,7 +864,6 @@ static int idToApp(const char *bits, int len) {
     case 3: return APP_TIMER;
     case 4: return APP_READER;
     case 5: return APP_BTCONF;
-    case 6: return APP_WEBAP;
     case 7: return APP_SCHEDULE;
     default: return -1;
   }
@@ -1005,39 +1003,9 @@ static void drawMenuItem(int y, const char *s, bool sel) {
   }
 }
 
-/* ==================== WiFi 配置热点 ==================== */
-static void drawWebAp() {
-  char buf[40];
-  drawTitleBar("WiFi 配置");
-  if (!waRunning()) {
-    drawCenter(ROW2, waLast());
-    return;
-  }
-  snprintf(buf, sizeof(buf), "热点 %s", waSsid());
-  drawText(0, ROW1, buf);
-  if (waIsOpen()) snprintf(buf, sizeof(buf), "%s", "开放热点 无密码");
-  else            snprintf(buf, sizeof(buf), "密码 %s", waPass());
-  drawText(0, ROW1 + 16, buf);
-
-  if (waUpFiles() > 0) {
-    uint32_t b = waUpBytes();
-    if (b >= 1024 * 1024)
-      snprintf(buf, sizeof(buf), "已传 %d 个 %lu.%luM", waUpFiles(),
-               (unsigned long)(b / 1048576), (unsigned long)((b / 104857) % 10));
-    else
-      snprintf(buf, sizeof(buf), "已传 %d 个 %luK", waUpFiles(), (unsigned long)(b / 1024));
-  } else {
-    int c = waClients();
-    if (c > 0) snprintf(buf, sizeof(buf), "%s %d台 ch%d", waIp(), c, waChannel());
-    else       snprintf(buf, sizeof(buf), "%s ch%d 等连接", waIp(), waChannel());
-  }
-  drawText(0, ROW1 + 32, buf);
-}
-
 /* ==================== 导航 ==================== */
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
-  if (gApp == APP_WEBAP)  waEnd();          /* 离开配置页立即关热点 */
   if (gApp == APP_READER) rdSaveProgress(); /* 离开阅读器先记下读到的位置 */
   if (gApp != APP_HOME) gLastApp = gApp;
   gApp = APP_HOME;
@@ -1047,7 +1015,6 @@ static void goHome() {
 static void enterApp(int id) {
   if (id < 0 || id >= APP_COUNT) return;
   if (gApp == APP_BTCONF && id != APP_BTCONF) btEnd();
-  if (gApp == APP_WEBAP  && id != APP_WEBAP)  waEnd();
   if (gApp != APP_HOME && gApp != id) gLastApp = gApp;
   gApp = id;
   gScr = SCR_APP;
@@ -1055,7 +1022,6 @@ static void enterApp(int id) {
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
   if (id == APP_READER) { gRdView = 0; gRdSel = 0; rdScan(); }  /* 先进书目 */
-  if (id == APP_WEBAP) waBegin();           /* 进页面立刻开热点（几十毫秒） */
 }
 
 /* ==================== 按键分发 ==================== */
@@ -1196,12 +1162,6 @@ static void handleKeys() {
       }
       break;
 
-    case APP_WEBAP:
-      /* 短按 # 换一个密码（热点重启），短按 * 回主页并关热点 */
-      if (hashS) { waEnd(); waBegin(); appToast("已换新密码", 1500); }
-      if (starS) goHome();
-      break;
-
     case APP_BTCONF:
       /* 短按 * 清配对并重启服务（长按 * 是全局回主页） */
       if (starS) { btClearBonds(); appToast("已清除配对", 1800); }
@@ -1268,14 +1228,6 @@ static void handleCmd(char *cmd) {
     logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
     logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
     logf("  ls                               列 LittleFS 文件\r\n");
-    logf("WiFi 配置热点（设备自开 AP，连不上时先看这里）\r\n");
-    logf("  ap                               热点参数 / 已连台数 / 信道 / 功率\r\n");
-    logf("  ap on | off                      开 / 关热点\r\n");
-    logf("  ap restart                       关掉再开（换密码）\r\n");
-    logf("  ap ch 1|6|11                     换信道（密码不变）\r\n");
-    logf("  ap open | wpa                    临时开成开放网络，排除密码因素\r\n");
-    logf("  ap proto b|bg|abgn               只开 11b / 11b+g / 全开（默认）\r\n");
-    logf("  ap selftest                      自己扫自己：判断 WiFi 发射通不通\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1299,32 +1251,6 @@ static void handleCmd(char *cmd) {
   else if (!strcasecmp(cmd, "verbose") && args) {
     gVerbose = !strcasecmp(args, "on");
     logf("[命令] 心跳 %s\r\n", gVerbose ? "开" : "关");
-  }
-  else if (!strcasecmp(cmd, "ap")) {
-    if (args && !strcasecmp(args, "on"))           { waBegin(); logf("[命令] 热点已开启\r\n"); }
-    else if (args && !strcasecmp(args, "off"))     { waEnd();   logf("[命令] 热点已关闭\r\n"); }
-    else if (args && !strcasecmp(args, "restart")) {
-      waEnd(); delay(200); waBegin();
-      logf("[命令] 热点已重启\r\n");
-    }
-    else if (args && !strncasecmp(args, "ch ", 3)) {
-      int ch = atoi(args + 3);
-      if (ch < 1 || ch > 13) logf("[命令] 信道要 1..13\r\n");
-      else { waSetChannel(ch); logf("[命令] 信道 -> %d\r\n", waChannel()); }
-    }
-    else if (args && !strcasecmp(args, "selftest")) { waSelfTest(); }
-    else if (args && !strcasecmp(args, "open")) { waSetOpen(true);  logf("[命令] 已切开放网络（无密码）\r\n"); }
-    else if (args && !strcasecmp(args, "wpa"))  { waSetOpen(false); logf("[命令] 已切回 WPA2 密码\r\n"); }
-    else if (args && !strncasecmp(args, "proto ", 6)) {
-      const char *p = args + 6;
-      int np = -1;
-      if      (!strcasecmp(p, "b"))    np = WA_PROTO_B;
-      else if (!strcasecmp(p, "bg"))   np = WA_PROTO_BG;
-      else if (!strcasecmp(p, "abgn")) np = WA_PROTO_ALL;
-      if (np < 0) logf("[命令] 用法: ap proto b|bg|abgn\r\n");
-      else { waSetProto((unsigned char)np); logf("[命令] 已切换协议\r\n"); }
-    }
-    else waPrintInfo();
   }
   else if (!strcasecmp(cmd, "ls")) {
     if (!gFsOk) { logf("[命令] 未挂载\r\n"); return; }
@@ -1433,7 +1359,6 @@ void loop() {
   keysPoll();
   if (Serial) cmdPoll(Serial);
   btPoll();
-  waPoll();
 
   uint32_t now = millis();
 
@@ -1475,7 +1400,6 @@ void loop() {
     if (gScr == SCR_APP && gApp == APP_HOME)      interval = 60;   /* 走马灯 45ms 一步 */
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
-    if (gScr == SCR_APP && gApp == APP_WEBAP)   interval = 60;   /* 同步进度 16fps */
     if (now - lastDraw >= interval) {
       lastDraw = now;
       clearBuf();
@@ -1490,7 +1414,6 @@ void loop() {
           case APP_SCHEDULE:  drawSchedule(); break;
           case APP_READER:    drawReader(); break;
           case APP_BTCONF:    drawBtConf(); break;
-          case APP_WEBAP:      drawWebAp(); break;
         }
       }
       drawToast();

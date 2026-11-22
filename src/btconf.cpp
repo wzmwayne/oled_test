@@ -18,6 +18,7 @@
 /* ---------- UUID ---------- */
 #define BT_SVC_UUID  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define BT_CHR_UUID  "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+#define BT_DAT_UUID  "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   /* 二进制批量上传 */
 #define BT_DEV_NAME  "OLED-Panel"
 
 #define NVS_NS       "cfg"
@@ -42,9 +43,45 @@ static uint32_t gPinErr = 0;
 
 static NimBLEServer          *gServer = nullptr;
 static NimBLECharacteristic  *gChr    = nullptr;
+static NimBLECharacteristic  *gDat    = nullptr;
 static TaskHandle_t           gTask   = nullptr;
 
 extern void appLog(const char *fmt, ...);
+
+/* ==================== 二进制批量上传 ====================
+ * 手机把文件切成 <=512 字节的小块，写 BT_DAT_UUID（无应答），
+ * 设备边收边写盘并累计 FNV-1a 校验。每收满 gBulkChunk 字节 NOTIFY 一次
+ * {len, hash}，手机核对后继续；对不上就 bbad 回退到上一次成功的位置重传。
+ */
+static NimBLECharacteristic *gCtrl = nullptr;      /* 就是 gChr，回包用 */
+static File     gUpFile;
+static char     gUpName[40] = "";
+static uint32_t gUpLen    = 0;      /* 已收字节 */
+static uint32_t gUpHash   = 2166136261u;
+static uint32_t gUpAckLen = 0;      /* 上一次确认的位置/校验 */
+static uint32_t gUpAckHash= 2166136261u;
+static uint32_t gBulkChunk = 32768; /* 每段校验大小，默认 32KB */
+
+static inline uint32_t fnv1a(uint32_t h, const uint8_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) { h ^= d[i]; h *= 16777619u; }
+  return h;
+}
+
+static void bulkClose() {
+  if (gUpFile) gUpFile.close();
+}
+
+/* 回包里带上进度，手机会拿它对校验 */
+static void bulkAck() {
+  if (!gChr) return;
+  char out[128];
+  snprintf(out, sizeof(out),
+           "{"ok":true,"action":"bputack","params":{"len":%u,"hash":%u}}",
+           (unsigned)gUpLen, (unsigned)gUpHash);
+  gChr->setValue((uint8_t *)out, strlen(out));
+  gChr->notify();
+}
+
 
 /* ==================== 配置存取 ==================== */
 /* 设备不联网，只保留时区：手机发来的是 UTC 时间戳，写 RTC 前要加上它。 */
@@ -164,7 +201,9 @@ static void handleJson(const char *in, size_t len) {
       appLog("[BT] PIN 错误过多，断开全部连接\r\n");
       NimBLEDevice::deinit(true);
       gServer = nullptr;
+      bulkClose();
       gChr = nullptr;
+      gDat = nullptr;
       gState = BT_STOPPED;
     }
     return;
@@ -235,6 +274,79 @@ static void handleJson(const char *in, size_t len) {
     }
     resp["ok"] = true;
     resp["params"]["count"] = n;
+
+  } else if (!strcmp(action, "bopen")) {
+    /* {"name":"x.ezzbk","size":123456,"chunk":32768} —— 开一个批量上传 */
+    const char *name = params["name"] | "";
+    uint32_t size  = params["size"] | 0;
+    uint32_t chunk = params["chunk"] | 0;
+    if (chunk >= 4096 && chunk <= 262144) gBulkChunk = chunk;
+    if (!bookNameOk(name)) {
+      resp["ok"] = false;
+      resp["msg"] = "文件名不合法";
+    } else {
+      bulkClose();
+      if (!LittleFS.exists(BOOK_DIR)) LittleFS.mkdir(BOOK_DIR);
+      size_t freeB = LittleFS.totalBytes() - LittleFS.usedBytes();
+      if (size && size > freeB) {
+        resp["ok"] = false;
+        resp["msg"] = "空间不足";
+      } else {
+        char path[64];
+        snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
+        gUpFile = LittleFS.open(path, "w");
+        if (!gUpFile) {
+          resp["ok"] = false;
+          resp["msg"] = "无法创建文件";
+        } else {
+          snprintf(gUpName, sizeof(gUpName), "%s", name);
+          gUpLen = 0;  gUpHash = 2166136261u;
+          gUpAckLen = 0; gUpAckHash = gUpHash;
+          resp["ok"] = true;
+          resp["msg"] = "开始上传";
+          resp["params"]["chunk"] = gBulkChunk;
+        }
+      }
+    }
+
+  } else if (!strcmp(action, "bbad")) {
+    /* 手机发现校验对不上：退回到上一次确认的位置重传 */
+    if (!gUpFile) {
+      resp["ok"] = false;
+      resp["msg"] = "没有进行中的上传";
+    } else if (!gUpFile.seek(gUpAckLen)) {
+      resp["ok"] = false;
+      resp["msg"] = "回退失败";
+    } else {
+      gUpLen = gUpAckLen; gUpHash = gUpAckHash;
+      resp["ok"] = true;
+      resp["msg"] = "已回退";
+      resp["params"]["len"] = gUpLen;
+      resp["params"]["hash"] = gUpHash;
+    }
+
+  } else if (!strcmp(action, "bclose")) {
+    /* {"size":N,"hash":H} —— 整本校验，通过才认 */
+    uint32_t size = params["size"] | 0;
+    uint32_t hash = params["hash"] | 0;
+    if (!gUpFile) {
+      resp["ok"] = false;
+      resp["msg"] = "没有进行中的上传";
+    } else {
+      if (gUpFile.size() > gUpLen) gUpFile.truncate(gUpLen);  /* 清掉重传留下的尾巴 */
+      gUpFile.close();
+      bool okSize = (size == 0 || size == gUpLen);
+      bool okHash = (hash == 0 || hash == gUpHash);
+      resp["ok"] = okSize && okHash;
+      resp["msg"] = (okSize && okHash) ? "校验通过"
+                  : (!okSize ? "长度不符" : "校验值不符");
+      resp["params"]["size"] = gUpLen;
+      resp["params"]["hash"] = gUpHash;
+      if (okSize && okHash) { rdForget(gUpName); rdScan(); }
+      appLog("[BT] bclose %s len=%u hash=%08X -> %s\r\n", gUpName,
+             (unsigned)gUpLen, (unsigned)gUpHash,
+             (okSize && okHash) ? "OK" : "FAIL");
+    }
 
   } else if (!strcmp(action, "bput")) {
     /* {"name":"三体.txt","off":0,"data":"<base64>"} —— 每包原文 <= 256 字节 */
@@ -438,6 +550,25 @@ class ChrCb : public NimBLECharacteristicCallbacks {
   }
 };
 
+/* 数据通道：纯二进制，无应答写，边收边写盘 */
+class DatCb : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &info) override {
+    if (!gUpFile) return;
+    NimBLEAttValue v = c->getValue();
+    size_t n = v.length();
+    if (!n) return;
+    const uint8_t *d = (const uint8_t *)v.data();
+    if (gUpFile.write(d, n) != n) { appLog("[BT] 写盘失败，空间不足？\r\n"); return; }
+    gUpLen += (uint32_t)n;
+    gUpHash = fnv1a(gUpHash, d, n);
+    if (gUpLen - gUpAckLen >= gBulkChunk) {
+      gUpAckLen = gUpLen;
+      gUpAckHash = gUpHash;
+      bulkAck();
+    }
+  }
+};
+
 /* ==================== 启动任务 ==================== */
 static void btStartTask(void *arg) {
   appLog("[BT] 任务开始，PIN=%s\r\n", gPin);
@@ -464,6 +595,11 @@ static void btStartTask(void *arg) {
              NIMBLE_PROPERTY::NOTIFY |
              NIMBLE_PROPERTY::READ);
   gChr->setCallbacks(new ChrCb());
+
+  gDat = svc->createCharacteristic(BT_DAT_UUID,
+             NIMBLE_PROPERTY::WRITE |
+             NIMBLE_PROPERTY::WRITE_NR);
+  gDat->setCallbacks(new DatCb());
   svc->start();
 
   appLog("[BT] service 已启动\r\n");
@@ -514,9 +650,11 @@ void btEnd() {
   /* 等启动任务收尾，避免任务还在跑就 deinit */
   for (int i = 0; i < 40 && gTask; i++) vTaskDelay(pdMS_TO_TICKS(10));
   gState = BT_STOPPED;
+  bulkClose();
   NimBLEDevice::deinit(true);
   gServer = nullptr;
   gChr = nullptr;
+  gDat = nullptr;
   appLog("[BT] 已停止\r\n");
 }
 
