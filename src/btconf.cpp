@@ -76,7 +76,7 @@ static void bulkAck() {
   if (!gChr) return;
   char out[128];
   snprintf(out, sizeof(out),
-           "{"ok":true,"action":"bputack","params":{"len":%u,"hash":%u}}",
+           "{\"ok\":true,\"action\":\"bputack\",\"params\":{\"len\":%u,\"hash\":%u}}",
            (unsigned)gUpLen, (unsigned)gUpHash);
   gChr->setValue((uint8_t *)out, strlen(out));
   gChr->notify();
@@ -333,16 +333,23 @@ static void handleJson(const char *in, size_t len) {
       resp["ok"] = false;
       resp["msg"] = "没有进行中的上传";
     } else {
-      if (gUpFile.size() > gUpLen) gUpFile.truncate(gUpLen);  /* 清掉重传留下的尾巴 */
+      uint32_t fsz = gUpFile.size();      /* 重传过的文件可能比有效长度长 */
       gUpFile.close();
-      bool okSize = (size == 0 || size == gUpLen);
+      bool okSize = (size == 0 || size == gUpLen) && (fsz == gUpLen);
       bool okHash = (hash == 0 || hash == gUpHash);
       resp["ok"] = okSize && okHash;
       resp["msg"] = (okSize && okHash) ? "校验通过"
                   : (!okSize ? "长度不符" : "校验值不符");
       resp["params"]["size"] = gUpLen;
       resp["params"]["hash"] = gUpHash;
-      if (okSize && okHash) { rdForget(gUpName); rdScan(); }
+      if (okSize && okHash) {
+        rdForget(gUpName);              /* 同名重传，旧进度作废 */
+        rdScan();
+      } else {
+        char bp[64];                      /* 校验不过就整本丢弃，不留半截文件 */
+        snprintf(bp, sizeof(bp), BOOK_DIR "/%s", gUpName);
+        LittleFS.remove(bp);
+      }
       appLog("[BT] bclose %s len=%u hash=%08X -> %s\r\n", gUpName,
              (unsigned)gUpLen, (unsigned)gUpHash,
              (okSize && okHash) ? "OK" : "FAIL");
