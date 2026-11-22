@@ -40,10 +40,15 @@ class TimetableActivity : AppCompatActivity() {
 
         grid.onCourseTap = { c -> editCourse(c) }
         grid.onEmptyTap = { day, min -> addCourse(day, min) }
+        grid.onDaySelected = { day ->
+            tvStatus.text = "已选 " + Course.DAY_NAMES[day - 1] + " · 点左侧时间就在这列新建"
+        }
 
         findViewById<MaterialButton>(R.id.btnTtBack).setOnClickListener { finish() }
         findViewById<MaterialButton>(R.id.btnTtReload).setOnClickListener { load() }
-        findViewById<MaterialButton>(R.id.btnTtAdd).setOnClickListener { addCourse(1, 8 * 60) }
+        findViewById<MaterialButton>(R.id.btnTtAdd).setOnClickListener {
+            addCourse(grid.selectedDay, 8 * 60)
+        }
         findViewById<MaterialButton>(R.id.btnTtSave).setOnClickListener { save() }
         findViewById<MaterialButton>(R.id.btnTtMenu).setOnClickListener { showMenu(it) }
 
