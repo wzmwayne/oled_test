@@ -19,7 +19,7 @@ import struct
 import sys
 
 MAGIC = b'EZZB'
-BLOCK = 4096
+BLOCK = 16384
 
 
 def parse_ezbk(data: bytes):
@@ -51,7 +51,9 @@ def parse_ezbk(data: bytes):
         if line.startswith('@'):
             continue                                 # @image / @cover / @blob 一律丢弃
         if line.startswith('\\'):
-            out.append(line[1:].rstrip('\r'))       # 去掉正文前缀
+            body = line[1:].rstrip('\r')            # 去掉正文前缀
+            # 正文以 # 或 \ 开头时保留一个转义反斜杠，避免被当成章标题
+            out.append('\\' + body if body[:1] in ('#', '\\') else body)
         elif line.strip() == '':
             out.append('')
         else:

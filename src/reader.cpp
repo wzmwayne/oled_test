@@ -17,7 +17,7 @@ extern int  appCpWidth(uint32_t cp);     /* 主固件：字库里的字宽，缺
 #define RD_DIR       "/books"
 #define RD_TOC_MAX   96
 #define RD_TOC_NAME  40
-#define EZB_BLOCK    4096
+#define EZB_BLOCK    16384   /* 块上限，实际值以文件头为准 */
 #define RD_HIST_MAX  64
 #define RD_BUF_SIZE  1024
 #define RD_NVS_NS    "rd"
@@ -238,6 +238,12 @@ static uint32_t layout(uint32_t start) {
       if (cp == 0) break;
       if (cp == '\r') { p = nx; continue; }
       if (cp == '\n') { p = nx; break; }
+
+      /* 行首反斜杠是转义：只丢这个字符，后面照常显示 */
+      if (cp == '\\' && (p == 0 || byteAt(p - 1) == '\n')) {
+        p = nx;
+        continue;
+      }
 
       /* 章节标记行不参与排版（只在目录里出现） */
       if (cp == '#' && w == 0 && (p == 0 || byteAt(p - 1) == '\n')) {

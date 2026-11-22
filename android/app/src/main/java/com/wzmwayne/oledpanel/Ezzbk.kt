@@ -16,7 +16,7 @@ import java.nio.ByteOrder
  */
 object Ezzbk {
 
-    private const val BLOCK = 4096
+    private const val BLOCK = 16384
 
     fun isEzbk(data: ByteArray): Boolean {
         val head = String(data, 0, minOf(6, data.size), Charsets.UTF_8)
@@ -39,7 +39,11 @@ object Ezzbk {
                 line == "---" -> {}
                 line.startsWith("@") -> {}
                 line.startsWith("#") -> out.append(line).append('\n')
-                line.startsWith("\\") -> out.append(line.substring(1)).append('\n')
+                line.startsWith("\\") -> {
+                    val body = line.substring(1)
+                    if (body.startsWith("#") || body.startsWith("\\")) out.append('\\')
+                    out.append(body).append('\n')
+                }
                 line.isBlank() -> out.append('\n')
                 else -> out.append(line).append('\n')
             }
