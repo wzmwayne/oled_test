@@ -2,8 +2,6 @@ package com.wzmwayne.oledpanel
 
 import java.util.Locale
 
-data class WifiItem(val ssid: String, val pass: String)
-
 data class Course(
     val index: Int,
     val name: String,

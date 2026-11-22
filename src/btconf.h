@@ -22,13 +22,10 @@ const char *btPinText();     /* 当前 6 位 PIN */
 void btClearBonds();         /* 清全部配对 + 重启服务 + 换 PIN */
 uint32_t btPinErrors();      /* PIN 错误次数，用于诊断 */
 
-/* ---- WiFi 列表（NVS "cfg"，最多 BT_WIFI_MAX 条）---- */
-#define BT_WIFI_MAX 5
-int  btWifiCount();                                            /* 当前保存条数 */
-bool btWifiGet(int i, char *ssid, size_t sl, char *pass, size_t pl);
-int  btWifiAdd(const char *ssid, const char *pass);             /* 返回索引，-1 失败 */
-bool btWifiDel(const char *ssid);
-bool btCfgGetNtp(char *srv, size_t sl, int *tz);
+/* ---- 时区（NVS "cfg"）----
+ * 设备不联网，只用它把手机给的 UTC 时间戳换算成本地时间写进 DS3231。 */
+int  btCfgGetTz();               /* -12..14，默认 8 */
+void btCfgSetTz(int tz);
 
 /* ---- 由主固件（oled_test.ino）提供 ---- */
 extern bool appNowYmd(int *y, int *m, int *d);   /* 本地日期，课表算 ISO 周用 */

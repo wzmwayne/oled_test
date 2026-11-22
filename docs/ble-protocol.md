@@ -15,13 +15,13 @@
 请求（写入特征，UTF-8 JSON）：
 
 ```json
-{"pin":"483920","action":"setwifi","params":{"ssid":"MyWiFi","pass":"12345678"}}
+{"pin":"483920","action":"settime","params":{"ts":1763860000}}
 ```
 
 响应（notify，UTF-8 JSON）：
 
 ```json
-{"ok":true,"action":"setwifi","msg":"已保存","params":{"index":0,"count":1}}
+{"ok":true,"action":"settime","msg":"时间已写入"}
 ```
 
 失败统一 `{"ok":false,"action":"...","msg":"中文原因"}`。
@@ -33,11 +33,8 @@
 | action | 请求 params | 响应 params |
 |---|---|---|
 | `ping` | — | — (`msg`=`pong`) |
-| `get` | — | `ntp` `tz` `wifi_count` `tt_count` `week_parity` |
-| `listwifi` | — | `count` `list:[{ssid,pass}]` |
-| `setwifi` | `ssid` `pass` | `index` `count` |
-| `delwifi` | `ssid` | `count` |
-| `setntp` | `server` `tz`(-12..14) | — |
+| `get` | — | `tz` `tt_count` `week_parity` `fs_free` |
+| `settz` | `tz`(-12..14) | — |
 | `settime` | `ts`（UTC 秒） | — |
 | `gettime` | — | `ts`（UTC 秒） |
 | `unpair` | — | —（清配对并重启服务，连接会断） |

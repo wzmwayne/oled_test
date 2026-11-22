@@ -47,118 +47,24 @@ static TaskHandle_t           gTask   = nullptr;
 extern void appLog(const char *fmt, ...);
 
 /* ==================== 配置存取 ==================== */
-static void cfgSetNtp(const char *server, int tz) {
+/* 设备不联网，只保留时区：手机发来的是 UTC 时间戳，写 RTC 前要加上它。 */
+int btCfgGetTz() {
+  Preferences p;
+  p.begin(NVS_NS, true);
+  int z = p.getInt("tz", 8);
+  p.end();
+  if (z < -12 || z > 14) z = 8;
+  return z;
+}
+
+void btCfgSetTz(int tz) {
+  if (tz < -12 || tz > 14) return;
   Preferences p;
   p.begin(NVS_NS, false);
-  p.putString("ntp", server);
   p.putInt("tz", tz);
   p.end();
 }
 
-bool btCfgGetNtp(char *srv, size_t sl, int *tz) {
-  Preferences p;
-  p.begin(NVS_NS, true);
-  String n = p.getString("ntp", "ntp.aliyun.com");
-  int    z = p.getInt("tz", 8);
-  p.end();
-  snprintf(srv, sl, "%s", n.c_str());
-  if (!*srv) snprintf(srv, sl, "ntp.aliyun.com");
-  if (z < -12 || z > 14) z = 8;
-  *tz = z;
-  return true;
-}
-
-/* ==================== WiFi 列表 ==================== */
-/* NVS 布局：wcnt=条数，ws<i>/wp<i>=第 i 条的 SSID/密码。
- * 老固件只存了单条 ssid/pass，首次读到 wcnt 缺失时自动迁移成第 0 条。 */
-int btWifiCount() {
-  Preferences p;
-  p.begin(NVS_NS, true);
-  int n = p.getInt("wcnt", -1);
-  if (n < 0) {
-    String s = p.getString("ssid", "");
-    String w = p.getString("pass", "");
-    p.end();
-    p.begin(NVS_NS, false);
-    if (s.length()) {
-      p.putString("ws0", s);
-      p.putString("wp0", w);
-      p.putInt("wcnt", 1);
-      p.end();
-      return 1;
-    }
-    p.putInt("wcnt", 0);
-    p.end();
-    return 0;
-  }
-  p.end();
-  return n > BT_WIFI_MAX ? BT_WIFI_MAX : n;
-}
-
-bool btWifiGet(int i, char *ssid, size_t sl, char *pass, size_t pl) {
-  int n = btWifiCount();
-  if (i < 0 || i >= n) return false;
-  char k[8];
-  Preferences p;
-  p.begin(NVS_NS, true);
-  snprintf(k, sizeof(k), "ws%d", i);
-  String s = p.getString(k, "");
-  snprintf(k, sizeof(k), "wp%d", i);
-  String w = p.getString(k, "");
-  p.end();
-  snprintf(ssid, sl, "%s", s.c_str());
-  if (pass) snprintf(pass, pl, "%s", w.c_str());
-  return true;
-}
-
-int btWifiAdd(const char *ssid, const char *pass) {
-  if (!ssid || !*ssid) return -1;
-  char s[40], w[68];
-  int  n = btWifiCount();
-  for (int i = 0; i < n; i++) {
-    if (btWifiGet(i, s, sizeof(s), w, sizeof(w)) && !strcmp(s, ssid)) {
-      Preferences p;
-      p.begin(NVS_NS, false);
-      char k[8];
-      snprintf(k, sizeof(k), "wp%d", i);
-      p.putString(k, pass ? pass : "");
-      p.end();
-      return i;
-    }
-  }
-  if (n >= BT_WIFI_MAX) return -1;
-  Preferences p;
-  p.begin(NVS_NS, false);
-  char k[8];
-  snprintf(k, sizeof(k), "ws%d", n); p.putString(k, ssid);
-  snprintf(k, sizeof(k), "wp%d", n); p.putString(k, pass ? pass : "");
-  p.putInt("wcnt", n + 1);
-  p.end();
-  return n;
-}
-
-bool btWifiDel(const char *ssid) {
-  if (!ssid || !*ssid) return false;
-  int n = btWifiCount();
-  if (n <= 0) return false;
-  char ss[BT_WIFI_MAX][40], pp[BT_WIFI_MAX][68];
-  for (int i = 0; i < n; i++) btWifiGet(i, ss[i], sizeof(ss[i]), pp[i], sizeof(pp[i]));
-  int idx = -1;
-  for (int i = 0; i < n; i++) if (!strcmp(ss[i], ssid)) { idx = i; break; }
-  if (idx < 0) return false;
-  Preferences p;
-  p.begin(NVS_NS, false);
-  char k[8];
-  for (int i = idx; i < n - 1; i++) {
-    snprintf(k, sizeof(k), "ws%d", i); p.putString(k, ss[i + 1]);
-    snprintf(k, sizeof(k), "wp%d", i); p.putString(k, pp[i + 1]);
-  }
-  snprintf(k, sizeof(k), "ws%d", n - 1); p.remove(k);
-  snprintf(k, sizeof(k), "wp%d", n - 1); p.remove(k);
-  p.putInt("wcnt", n - 1);
-  p.end();
-  return true;
-}
 
 /* ==================== 课表整体下发 ====================
  * 一次 BLE 写放不下整张表，按「追加 → 结束」两段式：
@@ -274,59 +180,16 @@ static void handleJson(const char *in, size_t len) {
     resp["msg"] = "pong";
 
   } else if (!strcmp(action, "get")) {
-    char ntp[68]; int tz = 8;
-    btCfgGetNtp(ntp, sizeof(ntp), &tz);
     resp["ok"] = true;
-    resp["params"]["ntp"]        = ntp;
-    resp["params"]["tz"]         = tz;
-    resp["params"]["wifi_count"] = btWifiCount();
-    resp["params"]["tt_count"]   = ttCount();
+    resp["params"]["tz"]          = btCfgGetTz();
+    resp["params"]["tt_count"]    = ttCount();
     resp["params"]["week_parity"] = ttIsOddWeek() ? 1 : 2;
+    resp["params"]["fs_free"]     = (uint32_t)(LittleFS.totalBytes() - LittleFS.usedBytes());
 
-  } else if (!strcmp(action, "listwifi")) {
-    int n = btWifiCount();
-    JsonArray arr = resp["params"]["list"].to<JsonArray>();
-    for (int i = 0; i < n; i++) {
-      char s[40], w[68];
-      btWifiGet(i, s, sizeof(s), w, sizeof(w));
-      JsonObject o = arr.add<JsonObject>();
-      o["ssid"] = s;
-      o["pass"] = w;
-    }
-    resp["ok"] = true;
-    resp["params"]["count"] = n;
-
-  } else if (!strcmp(action, "setwifi")) {
-    const char *ssid = params["ssid"] | "";
-    const char *pass = params["pass"] | "";
-    if (!*ssid) { resp["ok"] = false; resp["msg"] = "ssid 为空"; }
-    else {
-      int idx = btWifiAdd(ssid, pass);
-      if (idx < 0) { resp["ok"] = false; resp["msg"] = "列表已满(最多5个)"; }
-      else {
-        resp["ok"] = true;
-        resp["msg"]  = "已保存";
-        resp["params"]["index"] = idx;
-        resp["params"]["count"] = btWifiCount();
-      }
-    }
-
-  } else if (!strcmp(action, "delwifi")) {
-    const char *ssid = params["ssid"] | "";
-    if (!*ssid) { resp["ok"] = false; resp["msg"] = "ssid 为空"; }
-    else {
-      bool ok = btWifiDel(ssid);
-      resp["ok"]  = ok;
-      resp["msg"] = ok ? "已删除" : "未找到";
-      resp["params"]["count"] = btWifiCount();
-    }
-
-  } else if (!strcmp(action, "setntp")) {
-    const char *server = params["server"] | "ntp.aliyun.com";
+  } else if (!strcmp(action, "settz")) {
     int tz = params["tz"] | 8;
-    cfgSetNtp(server, tz);
-    resp["ok"] = true;
-    resp["msg"] = "已保存";
+    if (tz < -12 || tz > 14) { resp["ok"] = false; resp["msg"] = "时区范围 -12..14"; }
+    else { btCfgSetTz(tz); resp["ok"] = true; resp["msg"] = "时区已保存"; }
 
   } else if (!strcmp(action, "settime")) {
     uint32_t ts = params["ts"] | 0;

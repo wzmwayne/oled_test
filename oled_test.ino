@@ -24,10 +24,9 @@
 #include "src/font_wqy14.h"
 #include "src/btconf.h"
 #include "src/timetable.h"
-#include "src/wifidbg.h"
+#include "src/wifiap.h"
 #include "src/reader.h"
 #include <time.h>
-#include <WiFi.h>
 #include <Preferences.h>
 
 #define OLED_SDA 6
@@ -546,7 +545,7 @@ static void tdStopClear() { gTdRun = false; gTdTotal = 0; wakeLockRelease(WL_TIM
 /* ==================== 界面状态 ==================== */
 enum AppId {
   APP_HOME = 0, APP_PRECISE, APP_STOPWATCH, APP_TIMER, APP_SCHEDULE,  /* 菜单可见 */
-  APP_READER, APP_BTCONF, APP_SYNC,                                   /* 隐藏，靠 ID 进 */
+  APP_READER, APP_BTCONF, APP_WEBAP,                                   /* 隐藏，靠 ID 进 */
   APP_COUNT
 };
 #define MENU_COUNT 5          /* 菜单只列前 5 项 */
@@ -555,7 +554,7 @@ enum Screen { SCR_APP, SCR_MENU, SCR_ID };
 
 static const char *APP_NAME[APP_COUNT] = {
   "主页", "精确时钟", "正计时", "倒计时", "课表",
-  "阅读器", "蓝牙配置", "ntp在线时间同步"
+  "阅读器", "蓝牙配置", "WiFi 配置"
 };
 
 static int      gApp = APP_HOME;
@@ -866,7 +865,7 @@ static int idToApp(const char *bits, int len) {
     case 3: return APP_TIMER;
     case 4: return APP_READER;
     case 5: return APP_BTCONF;
-    case 6: return APP_SYNC;
+    case 6: return APP_WEBAP;
     case 7: return APP_SCHEDULE;
     default: return -1;
   }
@@ -995,216 +994,6 @@ static void drawToast() {
   drawTextMode(x > 0 ? x : 0, ROW3, gToast, 1, false);
 }
 
-/* ==================== NTP 在线同步 ==================== */
-enum { NTP_IDLE = 0, NTP_RUNNING, NTP_OK, NTP_FAIL };
-static volatile int  gNtpState = NTP_IDLE;
-static volatile int  gNtpPct   = 0;
-static char          gNtpMsg[28] = "";
-static volatile bool gNtpBusy  = false;
-
-/* 校时页面的内部状态 */
-enum { SY_MENU = 0, SY_TS, SY_PICK, SY_RUN, SY_DONE, SY_FAIL };
-static int gSyPage    = SY_MENU;
-static int gSyMenuSel = 0;        /* 0=当前时钟模块时间  1=开始校时 */
-static int gSyPickSel = 0;        /* WiFi 列表光标 */
-static int gSyWifiIdx = 0;        /* 本次选中的 WiFi 索引 */
-
-static void ntpSetMsg(const char *m) { snprintf(gNtpMsg, sizeof(gNtpMsg), "%s", m); }
-
-static void ntpFail(const char *m) {
-  ntpSetMsg(m);
-  gNtpState = NTP_FAIL;
-  gNtpBusy  = false;
-}
-
-static const char *wlName(wl_status_t s) {
-  switch (s) {
-    case WL_IDLE_STATUS:     return "IDLE";
-    case WL_NO_SSID_AVAIL:   return "NO_SSID";
-    case WL_SCAN_COMPLETED:  return "SCAN_DONE";
-    case WL_CONNECTED:       return "CONNECTED";
-    case WL_CONNECT_FAILED:  return "CONNECT_FAILED";
-    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
-    case WL_DISCONNECTED:    return "DISCONNECTED";
-    default:                 return "UNKNOWN";
-  }
-}
-
-static const char *authName(wifi_auth_mode_t m) {
-  switch (m) {
-    case WIFI_AUTH_OPEN:          return "OPEN";
-    case WIFI_AUTH_WEP:           return "WEP";
-    case WIFI_AUTH_WPA_PSK:       return "WPA-PSK";
-    case WIFI_AUTH_WPA2_PSK:      return "WPA2-PSK";
-    case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2";
-    case WIFI_AUTH_ENTERPRISE:    return "WPA2-ENT";
-    case WIFI_AUTH_WPA3_PSK:      return "WPA3-SAE";
-    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
-    case WIFI_AUTH_WAPI_PSK:      return "WAPI";
-    case WIFI_AUTH_OWE:           return "OWE";
-    default:                      return "OTHER";
-  }
-}
-
-static void ntpSyncTask(void *arg) {
-  char     ssid[40], pass[68], srv[68];
-  int      tz = 8;
-  uint32_t t0;
-  time_t   now;
-  int      idx = gSyWifiIdx;
-  bool     success = false;
-
-  btCfgGetNtp(srv, sizeof(srv), &tz);
-  gTzHour = tz;
-
-  logf("\r\n[NTP] ===== 开始校时 =====\r\n");
-  logf("[NTP] WiFi 索引 %d / 共 %d 条\r\n", idx, btWifiCount());
-  logf("[NTP] 时区 UTC%+d   服务器 %s\r\n", tz, srv);
-
-  if (!btWifiGet(idx, ssid, sizeof(ssid), pass, sizeof(pass))) {
-    logf("[NTP] 取 WiFi 配置失败\r\n");
-    ntpFail("WiFi 不存在");
-    goto done;
-  }
-  logf("[NTP] SSID=\"%s\" 密码长度=%u\r\n", ssid, (unsigned)strlen(pass));
-
-  /* ---- 1. 扫描：确认目标 AP 可见并打印其属性 ---- */
-  ntpSetMsg("扫描 WiFi");
-  gNtpPct = 4;
-  logf("[NTP] 扫描中...\r\n");
-  {
-    int found = WiFi.scanNetworks();
-    logf("[NTP] 扫描完成，共 %d 个 AP\r\n", found);
-    bool hit = false;
-    for (int i = 0; i < found; i++) {
-      if (WiFi.SSID(i) == String(ssid)) {
-        logf("[NTP] 命中目标 RSSI=%d dBm 信道=%d 加密=%s\r\n",
-             (int)WiFi.RSSI(i), (int)WiFi.channel(i),
-             authName(WiFi.encryptionType(i)));
-        hit = true;
-      }
-    }
-    if (!hit) logf("[NTP] 警告 扫描列表里没有 \"%s\"（信号弱或隐藏 SSID）\r\n", ssid);
-    WiFi.scanDelete();
-  }
-
-  /* ---- 2. 连接 ---- */
-  ntpSetMsg("连接 WiFi");
-  gNtpPct = 10;
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  logf("[NTP] WiFi.begin(\"%s\")\r\n", ssid);
-  WiFi.begin(ssid, pass);
-
-  {
-    wl_status_t last = WL_IDLE_STATUS;
-    t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) {
-      wl_status_t st = WiFi.status();
-      if (st != last) {
-        logf("[NTP] 状态 %s -> %s  (%u ms)\r\n",
-             wlName(last), wlName(st), (unsigned)(millis() - t0));
-        last = st;
-      }
-      vTaskDelay(pdMS_TO_TICKS(200));
-      int pct = 10 + (int)((millis() - t0) * 30 / 25000);
-      gNtpPct = pct > 40 ? 40 : pct;
-    }
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    logf("[NTP] 连接失败 最终状态=%s\r\n", wlName(WiFi.status()));
-    logf("[NTP] 最近断开原因=%s（串口执行 wifi status 看中文诊断）\r\n", wifiDbgLastReason());
-    logf("[NTP] 建议：wifi scan 看目标是否可见；wifi conn %d 复现连接过程\r\n", idx);
-    ntpFail("WiFi 连接失败");
-    goto done;
-  }
-
-  logf("[NTP] 连接成功 耗时 %u ms\r\n", (unsigned)(millis() - t0));
-  wifiSetPublicDns();   /* 内置 223.5.5.5 / 114.114.114.114，避开路由器 DNS 故障 */
-  logf("[NTP] IP=%s 掩码=%s\r\n",
-       WiFi.localIP().toString().c_str(), WiFi.subnetMask().toString().c_str());
-  logf("[NTP] 网关=%s DNS=%s\r\n",
-       WiFi.gatewayIP().toString().c_str(), WiFi.dnsIP().toString().c_str());
-  logf("[NTP] MAC=%s BSSID=%s RSSI=%d dBm\r\n",
-       WiFi.macAddress().c_str(), WiFi.BSSIDstr().c_str(), (int)WiFi.RSSI());
-
-  /* ---- 3. 请求 NTP ---- */
-  ntpSetMsg("等待 NTP");
-  gNtpPct = 45;
-  logf("[NTP] configTime(0,0,\"%s\")\r\n", srv);
-  configTime(0, 0, srv);
-
-  {
-    uint32_t t1 = millis();
-    int tries = 0;
-    now = 0;
-    while (millis() - t1 < 30000) {
-      now = time(nullptr);
-      tries++;
-      if (now > 1600000000) break;
-      vTaskDelay(pdMS_TO_TICKS(200));
-      int pct = 45 + (int)((millis() - t1) * 50 / 30000);
-      gNtpPct = pct > 95 ? 95 : pct;
-    }
-    if (now > 1600000000)
-      logf("[NTP] 收到时间 time()=%lu（轮询 %d 次，%u ms）\r\n",
-           (unsigned long)now, tries, (unsigned)(millis() - t1));
-    else
-      logf("[NTP] 超时 30s 内无有效时间，最后一次=%lu\r\n", (unsigned long)now);
-  }
-
-  if (now <= 1600000000) { ntpFail("NTP 超时"); goto done; }
-
-  {
-    struct tm tu, tl;
-    time_t utc = now;
-    time_t loc = now + (time_t)tz * 3600;
-    gmtime_r(&utc, &tu);
-    gmtime_r(&loc, &tl);
-    logf("[NTP] UTC  %04d-%02d-%02d %02d:%02d:%02d\r\n",
-         tu.tm_year + 1900, tu.tm_mon + 1, tu.tm_mday,
-         tu.tm_hour, tu.tm_min, tu.tm_sec);
-    logf("[NTP] 本地 %04d-%02d-%02d %02d:%02d:%02d (UTC%+d)\r\n",
-         tl.tm_year + 1900, tl.tm_mon + 1, tl.tm_mday,
-         tl.tm_hour, tl.tm_min, tl.tm_sec, tz);
-  }
-
-  gNtpPct = 97;
-  ntpSetMsg("写入 RTC");
-  if (appRtcWriteUnix((uint32_t)now)) {
-    success = true;
-    logf("[NTP] DS3231 写入成功\r\n");
-  } else {
-    logf("[NTP] DS3231 写入失败\r\n");
-    ntpFail("写 RTC 失败");
-  }
-
-done:
-  /* ---- 4. 最后一步：关闭 WiFi ---- */
-  ntpSetMsg("关闭 WiFi");
-  gNtpPct = 98;
-  logf("[NTP] 关闭 WiFi: disconnect(true) + mode(WIFI_OFF)\r\n");
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  logf("[NTP] WiFi 已关闭\r\n");
-
-  if (success) { gNtpState = NTP_OK; gNtpPct = 100; }
-  logf("[NTP] ===== 校时结束 %s =====\r\n\r\n", success ? "成功" : "失败");
-  gNtpBusy = false;
-  vTaskDelete(NULL);
-}
-
-static void ntpBegin() {
-  if (gNtpBusy) return;
-  gNtpBusy  = true;
-  gNtpState = NTP_RUNNING;
-  gNtpPct   = 0;
-  ntpSetMsg("准备连接");
-  if (xTaskCreate(ntpSyncTask, "ntp", 6144, nullptr, 2, nullptr) != pdPASS)
-    ntpFail("任务创建失败");
-}
 
 /* 菜单项：选中时整行反白 */
 static void drawMenuItem(int y, const char *s, bool sel) {
@@ -1216,80 +1005,38 @@ static void drawMenuItem(int y, const char *s, bool sel) {
   }
 }
 
-static void drawSync() {
-  char buf[32];
-
-  /* 后台任务结束时把页面从"进行中"切到结果页 */
-  if (gSyPage == SY_RUN) {
-    if (gNtpState == NTP_OK)        gSyPage = SY_DONE;
-    else if (gNtpState == NTP_FAIL) gSyPage = SY_FAIL;
+/* ==================== WiFi 配置热点 ==================== */
+static void drawWebAp() {
+  char buf[40];
+  drawTitleBar("WiFi 配置");
+  if (!waRunning()) {
+    drawCenter(ROW2, waLast());
+    return;
   }
+  snprintf(buf, sizeof(buf), "热点 %s", waSsid());
+  drawText(0, ROW1, buf);
+  snprintf(buf, sizeof(buf), "密码 %s", waPass());
+  drawText(0, ROW1 + 16, buf);
 
-  switch (gSyPage) {
-    case SY_MENU:
-      drawTitleBar("ntp在线时间同步");
-      drawMenuItem(ROW1, "当前时钟模块时间", gSyMenuSel == 0);
-      drawMenuItem(ROW2, "开始校时",         gSyMenuSel == 1);
-      break;
-
-    case SY_TS: {
-      drawTitleBar("当前时钟模块时间");
-      uint32_t ts = 0;
-      const char *s = appRtcReadUnix(&ts) ? nullptr : "读取失败";
-      if (!s) { snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts); s = buf; }
-      drawCenter(ROW1 + 4, "unix 时间戳");
-      drawCenter(ROW2 + 2, s);
-      break;
-    }
-
-    case SY_PICK: {
-      drawTitleBar("选择 WiFi");
-      int n = btWifiCount();
-      if (n == 0) {
-        drawCenter(ROW2, "未保存 WiFi");
-      } else {
-        int first = (gSyPickSel >= 3) ? gSyPickSel - 2 : 0;
-        for (int i = 0; i < 3; i++) {
-          int idx = first + i;
-          if (idx >= n) break;
-          char s[40], w[68];
-          btWifiGet(idx, s, sizeof(s), w, sizeof(w));
-          drawMenuItem(ROW1 + i * 16, s, idx == gSyPickSel);
-        }
-        if (first > 0)     fillRect(124, 2, 127, 5);
-        if (first + 3 < n) fillRect(124, 58, 127, 61);
-      }
-      break;
-    }
-
-    case SY_RUN:
-      /* 加载动画：标题带百分比，正文是当前步骤 */
-      snprintf(buf, sizeof(buf), "校时中 %d%%", gNtpPct);
-      drawLoading(buf, gNtpMsg, gAnimTick);
-      break;
-
-    case SY_DONE: {
-      drawTitleBar("ntp在线时间同步");
-      drawCenterScaled(ROW1 + 2, "同步成功", 2);
-      uint32_t ts = 0;
-      if (appRtcReadUnix(&ts)) {
-        snprintf(buf, sizeof(buf), "%lu", (unsigned long)ts);
-        drawCenter(ROW2 + 2, buf);
-      }
-      break;
-    }
-
-    case SY_FAIL:
-      drawTitleBar("ntp在线时间同步");
-      drawCenterScaled(ROW1 + 4, "同步失败", 1);
-      drawCenter(ROW2 + 4, gNtpMsg);
-      break;
+  if (waUpFiles() > 0) {
+    uint32_t b = waUpBytes();
+    if (b >= 1024 * 1024)
+      snprintf(buf, sizeof(buf), "已传 %d 个 %lu.%luM", waUpFiles(),
+               (unsigned long)(b / 1048576), (unsigned long)((b / 104857) % 10));
+    else
+      snprintf(buf, sizeof(buf), "已传 %d 个 %luK", waUpFiles(), (unsigned long)(b / 1024));
+  } else {
+    int c = waClients();
+    if (c > 0) snprintf(buf, sizeof(buf), "%s %d台", waIp(), c);
+    else       snprintf(buf, sizeof(buf), "%s 等连接", waIp());
   }
+  drawText(0, ROW1 + 32, buf);
 }
 
 /* ==================== 导航 ==================== */
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
+  if (gApp == APP_WEBAP)  waEnd();          /* 离开配置页立即关热点 */
   if (gApp == APP_READER) rdSaveProgress(); /* 离开阅读器先记下读到的位置 */
   if (gApp != APP_HOME) gLastApp = gApp;
   gApp = APP_HOME;
@@ -1299,6 +1046,7 @@ static void goHome() {
 static void enterApp(int id) {
   if (id < 0 || id >= APP_COUNT) return;
   if (gApp == APP_BTCONF && id != APP_BTCONF) btEnd();
+  if (gApp == APP_WEBAP  && id != APP_WEBAP)  waEnd();
   if (gApp != APP_HOME && gApp != id) gLastApp = gApp;
   gApp = id;
   gScr = SCR_APP;
@@ -1306,10 +1054,7 @@ static void enterApp(int id) {
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
   if (id == APP_READER) { gRdView = 0; gRdSel = 0; rdScan(); }  /* 先进书目 */
-  if (id == APP_SYNC) {                     /* 进页面只重置到菜单，等用户确认 */
-    gSyPage = SY_MENU; gSyMenuSel = 0; gSyPickSel = 0;
-    gNtpState = NTP_IDLE; gNtpBusy = false;
-  }
+  if (id == APP_WEBAP) waBegin();           /* 进页面立刻开热点（几十毫秒） */
 }
 
 /* ==================== 按键分发 ==================== */
@@ -1450,48 +1195,10 @@ static void handleKeys() {
       }
       break;
 
-    case APP_SYNC:
-      switch (gSyPage) {
-        case SY_MENU:
-          if (zeroS && gSyMenuSel > 0) gSyMenuSel--;
-          if (oneS  && gSyMenuSel < 1) gSyMenuSel++;
-          if (hashS) {
-            if (gSyMenuSel == 0) {
-              gSyPage = SY_TS;
-            } else if (btWifiCount() > 0) {
-              gSyPickSel = 0;
-              gSyPage    = SY_PICK;
-            } else {
-              appToast("未保存 WiFi", 1500);
-            }
-          }
-          if (starS) goHome();
-          break;
-
-        case SY_TS:
-          if (starS || hashS) gSyPage = SY_MENU;
-          break;
-
-        case SY_PICK: {
-          int n = btWifiCount();
-          if (zeroS && gSyPickSel > 0)     gSyPickSel--;
-          if (oneS  && gSyPickSel < n - 1) gSyPickSel++;
-          if (hashS && n > 0) {
-            gSyWifiIdx = gSyPickSel;
-            gSyPage    = SY_RUN;
-            ntpBegin();
-          }
-          if (starS) gSyPage = SY_MENU;
-          break;
-        }
-
-        case SY_RUN:
-          break;   /* 进行中不响应按键 */
-
-        default:   /* SY_DONE / SY_FAIL */
-          if (starS || hashS) { gSyPage = SY_MENU; gNtpState = NTP_IDLE; }
-          break;
-      }
+    case APP_WEBAP:
+      /* 短按 # 换一个密码（热点重启），短按 * 回主页并关热点 */
+      if (hashS) { waEnd(); waBegin(); appToast("已换新密码", 1500); }
+      if (starS) goHome();
       break;
 
     case APP_BTCONF:
@@ -1560,18 +1267,6 @@ static void handleCmd(char *cmd) {
     logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
     logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
     logf("  ls                               列 LittleFS 文件\r\n");
-    logf("WiFi 调试（USB 串口，不占用 GPIO）\r\n");
-    logf("  wifi                             子命令帮助\r\n");
-    logf("  wifi on | off                    开 / 关射频\r\n");
-    logf("  wifi reset                       射频卡住时复位\r\n");
-    logf("  wifi status                      状态/IP/信号/最近断开原因\r\n");
-    logf("  wifi scan                        扫描周边 AP\r\n");
-    logf("  wifi list                        已保存的 WiFi\r\n");
-    logf("  wifi conn <序号|SSID> [密码]      连接，逐步打印状态与失败原因\r\n");
-    logf("  wifi ping <主机> [次数]           ICMP ping\r\n");
-    logf("  wifi curl [-I] <URL>              HTTP(S) 请求，带耗时与错误码\r\n");
-    logf("  wifi dns <主机>                   只做域名解析\r\n");
-    logf("  wifi ntp [服务器]                 单次 SNTP 查询并对比 RTC\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1595,9 +1290,6 @@ static void handleCmd(char *cmd) {
   else if (!strcasecmp(cmd, "verbose") && args) {
     gVerbose = !strcasecmp(args, "on");
     logf("[命令] 心跳 %s\r\n", gVerbose ? "开" : "关");
-  }
-  else if (!strcasecmp(cmd, "wifi")) {
-    wifiDbgRun(args);
   }
   else if (!strcasecmp(cmd, "ls")) {
     if (!gFsOk) { logf("[命令] 未挂载\r\n"); return; }
@@ -1648,7 +1340,6 @@ void setup() {
   gLedToggleAt = millis();
 
   keysInit();
-  wifiDbgBegin();          /* 注册 STA 断开事件，wifi status 能报原因码 */
   Wire.begin(OLED_SDA, OLED_SCL, 100000);
   Wire.setClock(gClock);
 
@@ -1660,13 +1351,10 @@ void setup() {
 
   fontMount();          /* 字库从 font 分区 mmap，失败的话屏幕会显示方块 */
 
-  /* 时区必须在任何 RTC 读写之前载入，否则时间会差一个时区 */
-  {
-    char srv[68]; int z = 8;
-    btCfgGetNtp(srv, sizeof(srv), &z);
-    gTzHour = z;
-    logf("[配置] 时区 UTC%+d  NTP=%s WiFi=%d 条\r\n", gTzHour, srv, btWifiCount());
-  }
+  /* 时区必须在任何 RTC 读写之前载入，否则手机下发的时间会差几个小时 */
+  gTzHour = btCfgGetTz();
+  logf("[配置] 时区 UTC%+d
+", gTzHour);
 
   uint8_t st = 0xFF;
   gRtcOk = dsReadRaw(0x0F, &st, 1);
@@ -1711,6 +1399,7 @@ void loop() {
   keysPoll();
   if (Serial) cmdPoll(Serial);
   btPoll();
+  waPoll();
 
   uint32_t now = millis();
 
@@ -1752,7 +1441,7 @@ void loop() {
     if (gScr == SCR_APP && gApp == APP_HOME)      interval = 60;   /* 走马灯 45ms 一步 */
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
-    if (gScr == SCR_APP && gApp == APP_SYNC)   interval = 60;   /* 同步进度 16fps */
+    if (gScr == SCR_APP && gApp == APP_WEBAP)   interval = 60;   /* 同步进度 16fps */
     if (now - lastDraw >= interval) {
       lastDraw = now;
       clearBuf();
@@ -1767,7 +1456,7 @@ void loop() {
           case APP_SCHEDULE:  drawSchedule(); break;
           case APP_READER:    drawReader(); break;
           case APP_BTCONF:    drawBtConf(); break;
-          case APP_SYNC:      drawSync(); break;
+          case APP_WEBAP:      drawWebAp(); break;
         }
       }
       drawToast();

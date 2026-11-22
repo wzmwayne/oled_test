@@ -46,23 +46,22 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 | `verbose on\|off` | 心跳日志 |
 | `ls` | 列 LittleFS 文件 |
 
-### WiFi 调试（走 USB 串口，不占 GPIO）
+## WiFi 配置页（设备自开热点）
 
-| 命令 | 作用 |
+设备**不连路由器、不做 NTP 校时**，时间由手机写入 RTC。用编号进「WiFi 配置」页后：
+
+1. 屏幕显示热点 `OLED-XXXX` 与随机 **8 位数字 + 小写字母**密码，密码每次进入重新生成（短按 `#` 可当场换一个）。
+2. 手机连上这个热点，浏览器打开 **http://192.168.4.1**。
+3. 网页里能做的事：
+
+| 页签 | 作用 |
 |---|---|
-| `wifi` | 子命令帮助 |
-| `wifi on` / `wifi off` | 开 / 关射频 |
-| `wifi reset` | 射频卡住时复位（关 → 开 STA） |
-| `wifi status` | 模式、状态、IP、信号、**最近一次断开原因 + 中文诊断** |
-| `wifi scan` | 扫描周边 AP，标出已保存的那几个 |
-| `wifi list` | 列出已保存的 WiFi |
-| `wifi conn <序号\|SSID> [密码]` | 连接，逐 3 秒打印状态迁移，失败给原因码与建议 |
-| `wifi ping <主机> [次数]` | ICMP ping |
-| `wifi curl [-I] <URL>` | HTTP(S) 请求：DNS / TCP / 首字节 / 状态码 / 正文头部，全带毫秒 |
-| `wifi dns <主机>` | 只验证 DNS |
-| `wifi ntp [服务器]` | 单次 SNTP 查询，并对比 RTC 快慢 |
+| 书库 | 拖文件直传（`.txt` / `.ezbk` / `.ezzbk`，HTTP 流式写 LittleFS，不带 base64），删除、看进度与剩余空间 |
+| 课表 | 直接粘贴/编辑课表 JSON，整体覆盖；一键单双周互换 |
+| 时间 | 写入 RTC，或用手机当前时间一键对齐 |
+| 设备 | 热点名、已连台数、空闲内存、存储占用、课时数、时区 |
 
-> 这些命令跑在独立任务（10KB 栈）里，TLS 握手不会打爆主循环栈；执行期间屏幕照常刷新，串口输出会与其他日志穿插。
+> 传书走 HTTP 而不是 BLE：BLE 每包 256 字节、还要 base64，一本几 MB 的书要几千包；网页直传是边收边写盘，同样一本几十秒完事。
 
 ### 核心日志
 
@@ -228,9 +227,11 @@ python3 genfont_c.py --chars "测试屏幕"   # 只要这些字
 
 ```
 oled_test/
-├── oled_test.ino          固件（界面/按键/OLED/DS3231/NTP）
+├── oled_test.ino          固件（界面/按键/OLED/DS3231）
 ├── src/
 │   ├── btconf.cpp/.h      BLE 配置服务
+│   ├── wifiap.cpp/.h      WiFi 配置热点 + 网页（传书/课表/对时）
+│   ├── reader.cpp/.h      阅读器（txt / ezzbk，走 ROM tinfl 解 deflate）
 │   ├── timetable.cpp/.h   课表存储与查询
 │   └── font_wqy14.h       字库声明（数据在 font 分区）
 ├── android/               手机端配置 App（Kotlin）
