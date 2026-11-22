@@ -62,7 +62,7 @@ static int gTzHour = 8;
 #define OLED_CONTRAST 0x7F
 #define BR_LEVELS    100    /* 用户档位 0..100，0 最暗 */
 #define BR_STEP      2
-#define BR_SAVE_MIN  10     /* 低于这个档位只在本次运行生效，不写 flash */
+#define BR_REG_SAVE_MIN 10  /* 寄存器值低于这个数只在本次运行生效，不写 flash */
 
 static int      gBright       = 72;   /* 用户档位（不是寄存器值） */
 static bool     gContrastDirty = false;
@@ -453,11 +453,12 @@ static void contrastStep(int dir) {
   contrastApply();
 
   char b[32];
-  if (gBright < BR_SAVE_MIN) {
-    /* 太暗的时候多半是临时看，别把它存成开机值 —— 否则下次开机黑着屏
-     * 还以为设备坏了。松手也不落盘，重启回到上次 >=10 的档位。 */
+  if (brightToReg(gBright) < BR_REG_SAVE_MIN) {
+    /* 寄存器打到 10 以下就是"关了灯看"的临时状态，别存成开机值 ——
+     * 否则下次开机几乎黑屏，还会以为设备坏了。松手也不落盘，
+     * 重启回到上次寄存器 >= 10 的档位。 */
     gContrastDirty = false;
-    snprintf(b, sizeof(b), "亮度 %d%%（临时，不保存）", gBright);
+    snprintf(b, sizeof(b), "亮度 %d%% → 0x%02X（临时，不保存）", gBright, brightToReg(gBright));
   } else {
     gContrastDirty  = true;
     gContrastSaveAt = millis() + 700;   /* 松手 0.7s 后再写，避开连按 */
@@ -1413,7 +1414,7 @@ static void handleCmd(char *cmd) {
     if (v > 255) v = 255;
     gBright = regToBright(v);
     contrastApply();
-    if (gBright >= BR_SAVE_MIN) contrastSave();
+    if (v >= BR_REG_SAVE_MIN) contrastSave();
     logf("[命令] 对比度设为 0x%02X\r\n", (unsigned)v);
   }
   else if (!strcasecmp(cmd, "loglevel") && args) {
