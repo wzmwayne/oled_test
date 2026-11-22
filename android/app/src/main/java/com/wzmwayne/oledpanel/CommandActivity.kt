@@ -884,56 +884,38 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         }
     }
 
+    /** 走二进制数据通道：段内无应答连写，每段回包校验，比 base64 分块快一个量级 */
     private fun startUpload(pin: String, name: String, bytes: ByteArray, free: Long) {
-        val total = (bytes.size + uploadChunkBytes - 1) / uploadChunkBytes
         uploadAbort = false
-        val tip = if (free >= 0) "剩余 " + free / 1024 + " KB · 共 " + total + " 块"
-                  else "共 " + total + " 块"
         val dlg = MaterialAlertDialogBuilder(this)
             .setTitle("上传 " + name)
-            .setMessage(tip)
+            .setMessage("准备中…  " + bytes.size / 1024 + " KB")
             .setNegativeButton("取消") { _, _ -> uploadAbort = true }
             .setCancelable(false)
             .create()
         dlg.show()
-        uploadChunk(dlg, pin, name, bytes, 0, total)
-    }
 
-    private fun uploadChunk(
-        dlg: AlertDialog,
-        pin: String,
-        name: String,
-        data: ByteArray,
-        index: Int,
-        total: Int
-    ) {
-        if (uploadAbort || isFinishing) {
-            if (dlg.isShowing) dlg.dismiss()
-            return
-        }
-        if (index >= total) {
-            dlg.setMessage("完成，共 " + data.size + " 字节")
-            handler.postDelayed({
-                if (dlg.isShowing) dlg.dismiss()
-                toast("已上传 " + name)
-            }, 500)
-            return
-        }
-
-        val off = index * uploadChunkBytes
-        val len = minOf(uploadChunkBytes, data.size - off)
-        val b64 = Base64.encodeToString(data, off, len, Base64.NO_WRAP)
-        val params = JSONObject().put("name", name).put("off", off).put("data", b64)
-
-        BleManager.send(pin, "bput", params) { res, _ ->
-            if (res?.ok != true) {
-                if (dlg.isShowing) dlg.dismiss()
-                toast("上传失败：" + (res?.msg ?: "设备无响应"))
-                return@send
+        val t0 = System.currentTimeMillis()
+        BulkUpload.start(pin, name, bytes, object : BulkUpload.Callback {
+            override fun onProgress(sent: Int, total: Int, kbps: Int) {
+                if (isFinishing || uploadAbort) return
+                val pct = if (total > 0) sent * 100 / total else 0
+                dlg.setMessage(pct.toString() + "%  ·  " + sent / 1024 + " / " + total / 1024 +
+                    " KB  ·  " + kbps + " KB/s")
             }
-            dlg.setMessage("" + (index + 1) + " / " + total + " 块  (" + (off + len) * 100 / data.size + "%)")
-            handler.post { uploadChunk(dlg, pin, name, data, index + 1, total) }
-        }
+
+            override fun onDone(ok: Boolean, message: String, failAt: Int) {
+                if (dlg.isShowing) dlg.dismiss()
+                if (ok) {
+                    val sec = ((System.currentTimeMillis() - t0) / 1000.0).coerceAtLeast(0.1)
+                    toast("已上传 " + name + "（校验通过，" +
+                        (bytes.size / 1024 / sec).toInt() + " KB/s）")
+                    showBooks()
+                } else {
+                    toast("上传失败：" + message + (if (failAt > 0) "（第 " + failAt + " 字节处）" else ""))
+                }
+            }
+        })
     }
 
     private fun queryDisplayName(uri: Uri): String {

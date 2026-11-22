@@ -29,6 +29,10 @@ import java.util.concurrent.CopyOnWriteArraySet
 object BleManager {
     enum class State { DISCONNECTED, CONNECTING, CONNECTED }
 
+    /** 设备每收满一段就回 bputack(len, hash)，批量上传靠它做流控与校验 */
+    var onBulkAck: ((len: Int, hash: Int) -> Unit)? = null
+    var onBulkAckLost: (() -> Unit)? = null
+
     interface Listener {
         fun onBleState(state: State, name: String?, address: String?)
         fun onBleRssi(rssi: Int)
@@ -40,6 +44,7 @@ object BleManager {
 
     private var gatt: BluetoothGatt? = null
     private var characteristic: BluetoothGattCharacteristic? = null
+    private var dataChar: BluetoothGattCharacteristic? = null
     private var notifyReady = false
     private var servicesRequested = false
     private var writeBusy = false
@@ -204,6 +209,33 @@ object BleManager {
         main.postDelayed(timeout, 12000)
 
         enqueue(raw.toByteArray(Charsets.UTF_8))
+    }
+
+    /** 往数据通道写一块（无应答）。返回 false 表示没连上/没找到特征 */
+    @Suppress("DEPRECATION")
+    fun bulkWrite(data: ByteArray): Boolean {
+        val g = gatt ?: return false
+        val chr = dataChar ?: return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeCharacteristic(chr, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) ==
+                    BluetoothGatt.GATT_SUCCESS
+            } else {
+                chr.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                chr.value = data
+                g.writeCharacteristic(chr)
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 批量传输期间把连接间隔要到最短，吞吐能翻几倍 */
+    fun boostConnection() {
+        try {
+            gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        } catch (e: Exception) {
+        }
     }
 
     private fun enqueue(data: ByteArray) {
@@ -392,6 +424,7 @@ object BleManager {
             return
         }
         characteristic = chr
+        dataChar = service?.getCharacteristic(UUID.fromString(Protocol.DATA_UUID))
 
         try {
             g.setCharacteristicNotification(chr, true)
@@ -491,6 +524,11 @@ object BleManager {
         if (res != null) {
             rxBuffer.setLength(0)
             LogStore.add(LogStore.Dir.RX, text, res)
+            if (res.action == "bputack") {
+                val p = res.params
+                onBulkAck?.invoke(p?.optInt("len", -1) ?: -1, p?.optInt("hash", 0) ?: 0)
+                return
+            }
             dispatch(res, text)
             return
         }
