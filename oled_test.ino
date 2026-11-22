@@ -1267,6 +1267,10 @@ static void handleCmd(char *cmd) {
     logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
     logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
     logf("  ls                               列 LittleFS 文件\r\n");
+    logf("WiFi 配置热点（设备自开 AP，连不上时先看这里）\r\n");
+    logf("  ap                               热点参数 / 已连台数 / 信道 / 功率\r\n");
+    logf("  ap on | off                      开 / 关热点\r\n");
+    logf("  ap restart                       关掉再开（顺带换密码）\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1290,6 +1294,14 @@ static void handleCmd(char *cmd) {
   else if (!strcasecmp(cmd, "verbose") && args) {
     gVerbose = !strcasecmp(args, "on");
     logf("[命令] 心跳 %s\r\n", gVerbose ? "开" : "关");
+  }
+  else if (!strcasecmp(cmd, "ap")) {
+    if (args && !strcasecmp(args, "on"))           { waBegin(); logf("[命令] 热点已开启\r\n"); }
+    else if (args && !strcasecmp(args, "off"))     { waEnd();   logf("[命令] 热点已关闭\r\n"); }
+    else if (args && !strcasecmp(args, "restart")) {
+      waEnd(); delay(200); waBegin();
+      logf("[命令] 热点已重启\r\n");
+    } else waPrintInfo();
   }
   else if (!strcasecmp(cmd, "ls")) {
     if (!gFsOk) { logf("[命令] 未挂载\r\n"); return; }
