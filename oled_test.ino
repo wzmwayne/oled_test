@@ -98,6 +98,27 @@ static const char *WAKE_NAME[] = {"按键", "倒计时到点", "RTC闹钟", "SQW
  * 改成先等最多 50ms 让缓冲排空，仍然没有位置才放弃这一路。 */
 static void toast(const char *m, uint32_t ms);
 
+/* 运行时可调的日志级别：0=关 1=ERROR 2=WARN 3=INFO 4=DEBUG 5=VERBOSE */
+static int gLogLevel = 2;
+
+static esp_log_level_t logLevelEnum() {
+  switch (gLogLevel) {
+    case 0:  return ESP_LOG_NONE;
+    case 1:  return ESP_LOG_ERROR;
+    case 2:  return ESP_LOG_WARN;
+    case 3:  return ESP_LOG_INFO;
+    case 4:  return ESP_LOG_DEBUG;
+    default: return ESP_LOG_VERBOSE;
+  }
+}
+
+static void logSetLevel(int lv) {
+  if (lv < 0) lv = 0;
+  if (lv > 5) lv = 5;
+  gLogLevel = lv;
+  esp_log_level_set("*", logLevelEnum());
+}
+
 static void logWrite(const char *buf, size_t len) {
   /* USB CDC 的一个坑：插着数据线但没打开串口软件时，USB 是枚举成功的
    * （(bool)Serial 为真），可主机不取数据，发送环形缓冲永远是满的。
@@ -1253,6 +1274,7 @@ static void handleCmd(char *cmd) {
     logf("  contrast 0x7F                    对比度 0-255\r\n");
     logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
     logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
+    logf("  loglevel 0..5                    核心库日志级别（默认2=仅警告）\r\n");
     logf("  ls                               列 LittleFS 文件\r\n");
     logf("==============================\r\n\r\n");
   }
@@ -1273,6 +1295,11 @@ static void handleCmd(char *cmd) {
     if (v > 255) v = 255;
     oledCmd(0x81); oledCmd((uint8_t)v);
     logf("[命令] 对比度设为 0x%02X\r\n", (unsigned)v);
+  }
+  else if (!strcasecmp(cmd, "loglevel") && args) {
+    int lv = atoi(args);
+    logSetLevel(lv);
+    logf("[命令] 日志级别 %d（0关 1错 2警告 3信息 4调试 5详细）\r\n", gLogLevel);
   }
   else if (!strcasecmp(cmd, "verbose") && args) {
     gVerbose = !strcasecmp(args, "on");
@@ -1318,7 +1345,10 @@ void setup() {
   /* Arduino 的 log_x 已由 CORE_DEBUG_LEVEL=5 打开；这里再把 IDF 组件的运行时
    * 过滤阈值放到最低。是否真有输出取决于 sdkconfig 的 LOG_MAXIMUM_LEVEL，
    * 预编译库若在更高级别把它编掉了，这一行不会有额外输出，也无副作用。 */
-  esp_log_level_set("*", ESP_LOG_VERBOSE);
+  /* 默认只留 WARN 及以上：核心库的 I2C 每帧十几条 VERBOSE 日志会把
+   * USB CDC 塞满，既慢又看不清自己的输出。需要细查时串口敲
+   * loglevel 5 当场放开，不用重新编译。 */
+  esp_log_level_set("*", logLevelEnum());
 
   /* 板载 LED：先熄灭，再由 loop 闪 3 秒 */
   pinMode(LED_PIN, OUTPUT);
