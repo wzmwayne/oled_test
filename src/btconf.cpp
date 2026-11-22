@@ -13,6 +13,7 @@
 #include <esp_random.h>
 #include <LittleFS.h>
 #include "timetable.h"
+#include "reader.h"
 
 /* ---------- UUID ---------- */
 #define BT_SVC_UUID  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -416,6 +417,7 @@ static void handleJson(const char *in, size_t len) {
       char path[64];
       snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
       bool ok = LittleFS.remove(path);
+      if (ok) rdForget(name);      /* 文件没了，阅读进度也一并清掉 */
       resp["ok"] = ok;
       resp["msg"] = ok ? "已删除" : "文件不存在";
     }

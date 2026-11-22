@@ -1,9 +1,11 @@
 /*
  * reader.cpp - 纯文本阅读器实现
+ * 见 reader.h。书目 + 分文件进度 + 按字节偏移排版。
  */
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -12,16 +14,18 @@
 extern void appLog(const char *fmt, ...);
 extern int  appCpWidth(uint32_t cp);     /* 主固件：字库里的字宽，缺字 8px */
 
-#define RD_DIR        "/books"
-#define RD_HIST_MAX   64
-#define RD_BUF_SIZE   1024
+#define RD_DIR       "/books"
+#define RD_HIST_MAX  64
+#define RD_BUF_SIZE  1024
+#define RD_NVS_NS    "rd"
+#define RD_IDX_KEY   "idx"
 
 static File     gFile;
 static bool     gOpen   = false;
-static char     gName[40];
+static char     gName[RD_NAME_MAX];
 static uint32_t gSize   = 0;
-static uint32_t gStart  = 0;      /* 当前页起始偏移 */
-static uint32_t gEnd    = 0;      /* 当前页结束偏移（下一页起点） */
+static uint32_t gStart  = 0;
+static uint32_t gEnd    = 0;
 static char     gLines[RD_LINES][RD_LINE_BYTES];
 
 static uint8_t  gBuf[RD_BUF_SIZE];
@@ -30,6 +34,36 @@ static int      gBufLen = 0;
 
 static uint32_t gHist[RD_HIST_MAX];
 static int      gHistN = 0;
+
+/* 书目 */
+static char     gBooks[RD_BOOK_MAX][RD_NAME_MAX];
+static uint32_t gBookSize[RD_BOOK_MAX];
+static uint32_t gBookPos[RD_BOOK_MAX];
+static int      gBookN = 0;
+
+/* ==================== 进度表（name -> offset） ==================== */
+static void progLoad(JsonDocument &doc) {
+  Preferences p;
+  p.begin(RD_NVS_NS, true);
+  String s = p.getString(RD_IDX_KEY, "{}");
+  p.end();
+  if (s.length() == 0 || deserializeJson(doc, s)) doc.clear();
+  if (!doc["m"].is<JsonObject>()) doc["m"].to<JsonObject>();
+}
+
+static void progSave(JsonDocument &doc) {
+  String s;
+  serializeJson(doc, s);
+  Preferences p;
+  p.begin(RD_NVS_NS, false);
+  p.putString(RD_IDX_KEY, s);
+  p.end();
+}
+
+static uint32_t progGet(JsonDocument &doc, const char *name) {
+  JsonObject m = doc["m"].as<JsonObject>();
+  return (uint32_t)(m[name] | 0u);
+}
 
 /* ==================== 带缓冲的按字节读 ==================== */
 static void bufReset() { gBufLen = 0; gBufPos = 0; }
@@ -84,7 +118,6 @@ static int utf8Put(char *dst, uint32_t cp) {
   return 4;
 }
 
-/* 避头：不能出现在行首的标点 */
 static bool noStart(uint32_t c) {
   switch (c) {
     case 0xFF0C: case 0x3002: case 0xFF01: case 0xFF1F: case 0x3001:
@@ -94,7 +127,6 @@ static bool noStart(uint32_t c) {
   }
   return false;
 }
-/* 避尾：不能留在一行末尾的标点 */
 static bool noEnd(uint32_t c) {
   switch (c) {
     case 0x300C: case 0x300E: case 0x3010: case 0xFF08: case 0x300A:
@@ -124,7 +156,6 @@ static uint32_t layout(uint32_t start) {
 
       int gw = appCpWidth(cp);
       if (w + gw > RD_WIDTH && w > 0) {
-        /* 放不下：优先退到上一个可断点（按词/按字），否则硬断 */
         if (hasBreak && lastBreak > pos) p = lastBreak;
         break;
       }
@@ -140,7 +171,7 @@ static uint32_t layout(uint32_t start) {
     out[n] = 0;
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
 
-    if (p <= pos) {                       /* 没进展，防止死循环 */
+    if (p <= pos) {
       pos = p;
       for (int k = li + 1; k < RD_LINES; k++) gLines[k][0] = 0;
       break;
@@ -156,86 +187,102 @@ static uint32_t layout(uint32_t start) {
   return pos;
 }
 
-/* ==================== 进度存取 ==================== */
-static void saveProgress() {
-  if (!gOpen) return;
-  Preferences p;
-  p.begin("rd", false);
-  p.putString("name", gName);
-  p.putUInt("pos", gStart);
-  p.end();
+/* ==================== 书目 ==================== */
+static bool isTxt(const char *n) {
+  size_t l = strlen(n);
+  return l > 4 && !strcasecmp(n + l - 4, ".txt");
 }
 
-static uint32_t loadProgress(const char *name) {
-  Preferences p;
-  p.begin("rd", true);
-  String n = p.getString("name", "");
-  uint32_t pos = p.getUInt("pos", 0);
-  p.end();
-  if (n != name) return 0;
-  return pos;
-}
+void rdScan() {
+  gBookN = 0;
 
-/* ==================== 对外接口 ==================== */
-void rdInit() {
-  if (!LittleFS.exists(RD_DIR)) LittleFS.mkdir(RD_DIR);
-}
+  JsonDocument doc;
+  progLoad(doc);
 
-bool rdOpen(const char *name) {
-  if (!name || !*name) return false;
-  rdClose();
-
-  char path[64];
-  snprintf(path, sizeof(path), RD_DIR "/%s", name);
-  gFile = LittleFS.open(path, "r");
-  if (!gFile) {
-    appLog("[阅读] 打不开 %s\r\n", path);
-    return false;
-  }
-
-  snprintf(gName, sizeof(gName), "%s", name);
-  gSize = gFile.size();
-  gOpen = true;
-  gHistN = 0;
-  bufReset();
-
-  uint32_t saved = loadProgress(gName);
-  gStart = (saved < gSize) ? saved : 0;
-  layout(gStart);
-  appLog("[阅读] %s  %u 字节  从 %u 继续  %d%%\r\n",
-         gName, (unsigned)gSize, (unsigned)gStart, rdPercent());
-  return true;
-}
-
-bool rdOpenLast() {
-  Preferences p;
-  p.begin("rd", true);
-  String n = p.getString("name", "");
-  p.end();
-  if (n.length() && rdOpen(n.c_str())) return true;
-
-  /* 没有记录就打开目录里第一个 txt */
   File dir = LittleFS.open(RD_DIR);
-  if (!dir) return false;
-  File f = dir.openNextFile();
-  while (f) {
-    if (!f.isDirectory()) {
-      const char *nm = f.name();
-      const char *slash = strrchr(nm, '/');
-      bool ok = rdOpen(slash ? slash + 1 : nm);
+  if (dir) {
+    File f = dir.openNextFile();
+    while (f && gBookN < RD_BOOK_MAX) {
+      if (!f.isDirectory()) {
+        const char *nm = f.name();
+        const char *slash = strrchr(nm, '/');
+        const char *base = slash ? slash + 1 : nm;
+        if (isTxt(base)) {
+          snprintf(gBooks[gBookN], RD_NAME_MAX, "%s", base);
+          gBookSize[gBookN] = (uint32_t)f.size();
+          gBookN++;
+        }
+      }
       f.close();
-      dir.close();
-      return ok;
+      f = dir.openNextFile();
     }
-    f.close();
-    f = dir.openNextFile();
+    dir.close();
   }
-  dir.close();
-  return false;
+
+  /* 按名字排序，列表位置才稳定 */
+  for (int i = 1; i < gBookN; i++) {
+    char tn[RD_NAME_MAX];
+    uint32_t ts;
+    snprintf(tn, sizeof(tn), "%s", gBooks[i]);
+    ts = gBookSize[i];
+    int j = i - 1;
+    while (j >= 0 && strcmp(gBooks[j], tn) > 0) {
+      snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", gBooks[j]);
+      gBookSize[j + 1] = gBookSize[j];
+      j--;
+    }
+    snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", tn);
+    gBookSize[j + 1] = ts;
+  }
+
+  /* 进度：只保留还在的书，孤儿进度直接删 */
+  bool changed = false;
+  JsonObject m = doc["m"].as<JsonObject>();
+  for (int i = 0; i < gBookN; i++) {
+    uint32_t pos = (uint32_t)(m[gBooks[i]] | 0u);
+    if (pos >= gBookSize[i]) pos = 0;
+    gBookPos[i] = pos;
+  }
+  {
+    /* 反向剪枝：进度表里有、书目里没有的键删掉 */
+    JsonArray deadKeys;
+    JsonDocument tmp;
+    JsonArray dead = tmp.to<JsonArray>();
+    for (JsonPair kv : m) {
+      bool found = false;
+      for (int i = 0; i < gBookN; i++)
+        if (!strcmp(kv.key().c_str(), gBooks[i])) { found = true; break; }
+      if (!found) { dead.add((const char *)kv.key().c_str()); }
+    }
+    (void)deadKeys;
+    for (JsonVariant v : dead) {
+      m.remove(v.as<const char *>());
+      changed = true;
+    }
+  }
+  if (changed) progSave(doc);
+
+  appLog("[阅读] 书目 %d 本\r\n", gBookN);
+  for (int i = 0; i < gBookN; i++)
+    appLog("[阅读]   %d) %s  %u B  %d%%\r\n", i, gBooks[i],
+           (unsigned)gBookSize[i],
+           gBookSize[i] ? (int)((uint64_t)gBookPos[i] * 100 / gBookSize[i]) : 0);
 }
 
-void rdClose() {
-  if (gOpen) { saveProgress(); gFile.close(); }
+int rdBookCount() { return gBookN; }
+
+const char *rdBookName(int i) {
+  return (i >= 0 && i < gBookN) ? gBooks[i] : "";
+}
+
+int rdBookPercent(int i) {
+  if (i < 0 || i >= gBookN || gBookSize[i] == 0) return 0;
+  return (int)((uint64_t)gBookPos[i] * 100 / gBookSize[i]);
+}
+
+/* ==================== 打开 / 关闭 ==================== */
+static void closeCurrent() {
+  if (gOpen) { gFile.close(); }
   gOpen = false;
   gName[0] = 0;
   gSize = 0;
@@ -244,20 +291,72 @@ void rdClose() {
   gLines[0][0] = 0;
 }
 
+bool rdOpenIndex(int i) {
+  if (i < 0 || i >= gBookN) return false;
+  closeCurrent();
+
+  char path[64];
+  snprintf(path, sizeof(path), RD_DIR "/%s", gBooks[i]);
+  gFile = LittleFS.open(path, "r");
+  if (!gFile) {
+    appLog("[阅读] 打不开 %s\r\n", path);
+    return false;
+  }
+
+  snprintf(gName, sizeof(gName), "%s", gBooks[i]);
+  gSize = (uint32_t)gFile.size();
+  gOpen = true;
+  bufReset();
+
+  gStart = gBookPos[i];
+  if (gStart >= gSize) gStart = 0;
+  layout(gStart);
+  appLog("[阅读] 打开 %s  %u 字节  从 %u 继续  %d%%\r\n",
+         gName, (unsigned)gSize, (unsigned)gStart, rdPercent());
+  return true;
+}
+
+void rdInit() {
+  if (!LittleFS.exists(RD_DIR)) LittleFS.mkdir(RD_DIR);
+  rdScan();
+}
+
+void rdForget(const char *name) {
+  if (!name || !*name) return;
+  JsonDocument doc;
+  progLoad(doc);
+  JsonObject m = doc["m"].as<JsonObject>();
+  if (m[name].is<JsonVariant>()) {
+    m.remove(name);
+    progSave(doc);
+    appLog("[阅读] 已清除 %s 的进度\r\n", name);
+  }
+  rdScan();
+}
+
 bool rdLoaded()      { return gOpen; }
 const char *rdName() { return gName; }
 uint32_t rdSize()    { return gSize; }
-uint32_t rdPos()     { return gStart; }
 int rdPercent()      { return gSize ? (int)((uint64_t)gStart * 100 / gSize) : 0; }
 const char *rdLine(int i) { return (i >= 0 && i < RD_LINES) ? gLines[i] : ""; }
 
+void rdSaveProgress() {
+  if (!gOpen) return;
+  JsonDocument doc;
+  progLoad(doc);
+  doc["m"][gName] = gStart;
+  progSave(doc);
+
+  for (int i = 0; i < gBookN; i++)
+    if (!strcmp(gBooks[i], gName)) { gBookPos[i] = gStart; break; }
+}
+
 void rdNext() {
   if (!gOpen || gEnd >= gSize) return;
-  if (gHistN < RD_HIST_MAX) gHist[gHistN] = gStart;
-  if (gHistN < RD_HIST_MAX) gHistN++;
+  if (gHistN < RD_HIST_MAX) gHist[gHistN++] = gStart;
   gStart = gEnd;
   layout(gStart);
-  saveProgress();
+  rdSaveProgress();
 }
 
 void rdPrev() {
@@ -265,8 +364,6 @@ void rdPrev() {
 
   if (gHistN == 0) {
     if (gStart == 0) return;
-    /* 历史栈空了（比如上次退出后重新打开）：从头重排一遍把页起点补回来。
-     * 一页约 150 字节，几十 KB 的书也就几百次 layout，肉眼几乎无感。 */
     uint32_t target = gStart;
     gHistN = 0;
     gStart = 0;
@@ -282,34 +379,5 @@ void rdPrev() {
   gHistN--;
   gStart = gHist[gHistN];
   layout(gStart);
-  saveProgress();
+  rdSaveProgress();
 }
-
-bool rdNextBook() {
-  File dir = LittleFS.open(RD_DIR);
-  if (!dir) return false;
-
-  /* 把所有 txt 收进来，找到当前这本的下一本 */
-  char names[16][40];
-  int n = 0;
-  File f = dir.openNextFile();
-  while (f && n < 16) {
-    if (!f.isDirectory()) {
-      const char *nm = f.name();
-      const char *slash = strrchr(nm, '/');
-      snprintf(names[n], sizeof(names[n]), "%s", slash ? slash + 1 : nm);
-      n++;
-    }
-    f.close();
-    f = dir.openNextFile();
-  }
-  dir.close();
-
-  if (n <= 1) return false;
-  int cur = -1;
-  for (int i = 0; i < n; i++) if (!strcmp(names[i], gName)) { cur = i; break; }
-  int next = (cur + 1) % n;
-  return rdOpen(names[next]);
-}
-
-void rdSaveProgress() { saveProgress(); }

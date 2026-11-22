@@ -874,18 +874,73 @@ static void drawBtConf() {
   drawCenter(50, btStateText());
 }
 
-/* 阅读器：无标题栏，4 行铺满，底部 1px 进度条 */
-static void drawReader() {
-  if (!rdLoaded()) {
-    drawTitleBar("阅读器");
+/* ---------------- 阅读器 ---------------- */
+static int gRdView = 0;   /* 0=书目 1=正文 */
+static int gRdSel  = 0;
+
+/* 按像素宽度截断，超出补省略号（不切断 UTF-8） */
+static void fitText(char *dst, size_t dn, const char *src, int maxW) {
+  int w = 0;
+  size_t o = 0;
+  const char *p = src;
+  while (*p) {
+    const char *q = p;
+    uint32_t cp = utf8Next(q);
+    const wqy14_glyph_t *g = findGlyph(cp);
+    int gw = g ? g->w : 8;
+    if (w + gw > maxW - 8) break;
+    size_t len = (size_t)(q - p);
+    if (o + len + 4 >= dn) break;
+    memcpy(dst + o, p, len);
+    o += len;
+    w += gw;
+    p = q;
+  }
+  if (*p && o + 3 < dn) {
+    dst[o++] = (char)0xE2; dst[o++] = (char)0x80; dst[o++] = (char)0xA6;
+  }
+  dst[o] = 0;
+}
+
+static void drawBookList() {
+  drawTitleBar("阅读器");
+  int n = rdBookCount();
+  if (n == 0) {
     drawCenter(ROW2, "还没有书");
     drawCenter(ROW3 + 2, "App 上传 txt");
     return;
   }
-  for (int i = 0; i < RD_LINES; i++) drawText(0, i * 15, rdLine(i));
+  if (gRdSel >= n) gRdSel = n - 1;
+  if (gRdSel < 0)  gRdSel = 0;
 
-  int pct = rdPercent();
-  int w = SCREEN_W * pct / 100;
+  int first = (gRdSel >= 3) ? gRdSel - 2 : 0;
+  for (int i = 0; i < 3; i++) {
+    int k = first + i;
+    if (k >= n) break;
+    char pct[8], buf[48];
+    snprintf(pct, sizeof(pct), "%d%%", rdBookPercent(k));
+    int pw = textWidthScaled(pct, 1);
+    fitText(buf, sizeof(buf), rdBookName(k), SCREEN_W - pw - 6);
+    int y = ROW1 + i * 16;
+    if (k == gRdSel) {
+      fillRect(0, y, SCREEN_W - 1, y + 14);
+      drawTextMode(2, y, buf, 1, false);
+      drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
+    } else {
+      drawText(2, y, buf);
+      drawText(SCREEN_W - pw - 2, y, pct);
+    }
+  }
+  if (first > 0)     fillRect(124, 2, 127, 5);
+  if (first + 3 < n) fillRect(124, 58, 127, 61);
+}
+
+static void drawReader() {
+  if (gRdView == 0 || !rdLoaded()) { drawBookList(); return; }
+
+  /* 正文：无标题栏，4 行铺满，底部 1px 进度条 */
+  for (int i = 0; i < RD_LINES; i++) drawText(0, i * 15, rdLine(i));
+  int w = SCREEN_W * rdPercent() / 100;
   if (w < 1) w = 1;
   hline(0, w - 1, 63);
 }
@@ -1213,7 +1268,7 @@ static void enterApp(int id) {
   gLastActivity = millis();
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
-  if (id == APP_READER) rdOpenLast();       /* 自动接着上次读到的地方 */
+  if (id == APP_READER) { gRdView = 0; gRdSel = 0; rdScan(); }  /* 先进书目 */
   if (id == APP_SYNC) {                     /* 进页面只重置到菜单，等用户确认 */
     gSyPage = SY_MENU; gSyMenuSel = 0; gSyPickSel = 0;
     gNtpState = NTP_IDLE; gNtpBusy = false;
@@ -1329,12 +1384,22 @@ static void handleKeys() {
     }
 
     case APP_READER:
-      /* 0/1 翻页（长按连翻），# 看进度、长按 # 换下一本，* 回主页 */
-      if (oneS  || oneR)  rdNext();
-      if (zeroS || zeroR) rdPrev();
-      if (hashS) { char b[16]; snprintf(b, sizeof(b), "%d%%", rdPercent()); appToast(b, 1200); }
-      if (hashL) { if (!rdNextBook()) appToast("只有这一本", 1200); }
-      if (starS) { rdSaveProgress(); goHome(); }
+      if (gRdView == 0) {
+        /* 书目：0/1 选，短按 # 打开，短按 * 回主页 */
+        int n = rdBookCount();
+        if ((zeroS || zeroR) && gRdSel > 0)     gRdSel--;
+        if ((oneS  || oneR)  && gRdSel < n - 1) gRdSel++;
+        if (hashS && n > 0) {
+          if (rdOpenIndex(gRdSel)) gRdView = 1;
+          else appToast("打开失败", 1500);
+        }
+        if (starS) goHome();
+      } else {
+        /* 正文：0/1 翻页，短按 # 或 * 回书目 */
+        if (oneS  || oneR)  rdNext();
+        if (zeroS || zeroR) rdPrev();
+        if (hashS || starS) { rdSaveProgress(); gRdView = 0; rdScan(); }
+      }
       break;
 
     case APP_SYNC:
