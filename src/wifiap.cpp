@@ -520,11 +520,11 @@ void waSelfTest() {
            (int)WiFi.RSSI(i), (unsigned)WiFi.channel(i));
   }
   if (selfIdx >= 0) {
-    appLog("[AP] 自己的 "%s" 收到了: %d dBm ch%u\r\n", gSsid,
+    appLog("[AP] 自己的 \"%s\" 收到了: %d dBm ch%u\r\n", gSsid,
            (int)WiFi.RSSI(selfIdx), (unsigned)WiFi.channel(selfIdx));
     appLog("[AP] 结论：beacon 确实发出去了，问题在手机侧/环境\r\n");
   } else {
-    appLog("[AP] 自己的 "%s" 没扫到 —— 连自己都收不到自己发的帧\r\n", gSsid);
+    appLog("[AP] 自己的 \"%s\" 没扫到 —— 连自己都收不到自己发的帧\r\n", gSsid);
     appLog("[AP] 结论：WiFi 发射通路不通（与密码、信道、校准无关）\r\n");
   }
 
