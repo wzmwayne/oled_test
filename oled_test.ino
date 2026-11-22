@@ -1275,6 +1275,7 @@ static void handleCmd(char *cmd) {
     logf("  ap ch 1|6|11                     换信道（密码不变）\r\n");
     logf("  ap open | wpa                    临时开成开放网络，排除密码因素\r\n");
     logf("  ap proto b|bg|abgn               只开 11b / 11b+g / 全开（默认）\r\n");
+    logf("  ap selftest                      自己扫自己：判断 WiFi 发射通不通\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1311,6 +1312,7 @@ static void handleCmd(char *cmd) {
       if (ch < 1 || ch > 13) logf("[命令] 信道要 1..13\r\n");
       else { waSetChannel(ch); logf("[命令] 信道 -> %d\r\n", waChannel()); }
     }
+    else if (args && !strcasecmp(args, "selftest")) { waSelfTest(); }
     else if (args && !strcasecmp(args, "open")) { waSetOpen(true);  logf("[命令] 已切开放网络（无密码）\r\n"); }
     else if (args && !strcasecmp(args, "wpa"))  { waSetOpen(false); logf("[命令] 已切回 WPA2 密码\r\n"); }
     else if (args && !strncasecmp(args, "proto ", 6)) {

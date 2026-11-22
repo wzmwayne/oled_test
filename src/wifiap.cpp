@@ -499,6 +499,41 @@ void waPoll() {
 }
 
 /* 串口 ap 命令用：把热点实际状态打出来 */
+/* 机内自检：自己当 AP 的同时用 STA 去扫，看能不能收到自己的 beacon。
+ * 「收得到自己的 beacon、手机收不到」和「连自己都收不到」是两件完全不同的事。 */
+void waSelfTest() {
+  if (!gOn) { appLog("[AP] 热点没开，先 ap on\r\n"); return; }
+
+  appLog("[AP] 自检开始：AP+STA 并存，扫一遍看有没有自己\r\n");
+  WiFi.mode(WIFI_AP_STA);
+  delay(300);
+
+  int n = WiFi.scanNetworks(false, true);   /* 同步扫描，含隐藏 SSID */
+  int selfIdx = -1;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == String(gSsid)) { selfIdx = i; break; }
+  }
+
+  appLog("[AP] 扫到 %d 个热点\r\n", n);
+  for (int i = 0; i < n && i < 6; i++) {
+    appLog("[AP]   %-20s %4d dBm  ch%u\r\n", WiFi.SSID(i).c_str(),
+           (int)WiFi.RSSI(i), (unsigned)WiFi.channel(i));
+  }
+  if (selfIdx >= 0) {
+    appLog("[AP] 自己的 "%s" 收到了: %d dBm ch%u\r\n", gSsid,
+           (int)WiFi.RSSI(selfIdx), (unsigned)WiFi.channel(selfIdx));
+    appLog("[AP] 结论：beacon 确实发出去了，问题在手机侧/环境\r\n");
+  } else {
+    appLog("[AP] 自己的 "%s" 没扫到 —— 连自己都收不到自己发的帧\r\n", gSsid);
+    appLog("[AP] 结论：WiFi 发射通路不通（与密码、信道、校准无关）\r\n");
+  }
+
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_AP);
+  delay(100);
+  appLog("[AP] 自检结束，回到纯 AP 模式\r\n");
+}
+
 void waPrintInfo() {
   if (!gOn) { appLog("[AP] 未开启\r\n"); return; }
   /* 注意：esp_wifi_get_channel 的两个参数都不能是 NULL，
