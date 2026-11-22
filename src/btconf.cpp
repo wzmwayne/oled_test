@@ -343,8 +343,17 @@ static void handleJson(const char *in, size_t len) {
       resp["ok"] = false;
       resp["msg"] = "没有进行中的上传";
     } else {
-      uint32_t fsz = gUpFile.size();      /* 重传过的文件可能比有效长度长 */
+      /* LittleFS 有写缓冲，没 flush 之前 size() 不准——之前就是在这里拿到
+       * 偏小的值，明明校验全对却报「长度不符」。先 flush 再关，最后重新 stat。 */
+      gUpFile.flush();
       gUpFile.close();
+      uint32_t fsz = 0;
+      {
+        char bp2[64];
+        snprintf(bp2, sizeof(bp2), BOOK_DIR "/%s", gUpName);
+        File chk = LittleFS.open(bp2, "r");
+        if (chk) { fsz = chk.size(); chk.close(); }
+      }
       bool okSize = (size == 0 || size == gUpLen) && (fsz == gUpLen);
       bool okHash = (hash == 0 || hash == gUpHash);
       resp["ok"] = okSize && okHash;

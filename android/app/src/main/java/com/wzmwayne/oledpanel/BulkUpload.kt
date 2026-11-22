@@ -85,17 +85,20 @@ object BulkUpload {
                 }
                 BleManager.boostConnection()
 
+                /* 段越大往返越少：默认 64KB（设备上限 256KB） */
                 val open = cmd(pin, "bopen",
-                    JSONObject().put("name", fileName).put("size", total), 15000)
+                    JSONObject().put("name", fileName).put("size", total)
+                        .put("chunk", 65536), 15000)
                 if (open?.ok != true) {
                     finish(cb, false, open?.msg ?: "设备拒绝开始", 0)
                     return@Thread
                 }
                 LogStore.add(LogStore.Dir.TX,
                     "bopen " + fileName + " " + total + " 字节")
-                var chunk = open.params?.optInt("chunk", 32768) ?: 32768
-                if (chunk < 4096) chunk = 32768
+                var chunk = open.params?.optInt("chunk", 65536) ?: 65536
+                if (chunk < 4096) chunk = 65536
                 if (BleManager.currentMtu < 200 && chunk > 8192) chunk = 8192
+                BleManager.boostConnection()   /* 再要一次最短间隔 */
 
                 var sent = 0
                 var sentHash = -2128831035
@@ -129,7 +132,8 @@ object BulkUpload {
                         sentHash = fnv(sentHash, data, off, n)
                         off += n
                         pkts++
-                        if (pkts % 8 == 0) Thread.sleep(3)
+                        /* 不做固定让位：写不进去时上面的重试循环会自然退让，
+                         * 固定 sleep 反而白等（原来每 8 包睡 3ms）。 */
                     }
                     sent = segEnd
 
