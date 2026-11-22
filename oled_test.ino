@@ -1015,7 +1015,8 @@ static void drawWebAp() {
   }
   snprintf(buf, sizeof(buf), "热点 %s", waSsid());
   drawText(0, ROW1, buf);
-  snprintf(buf, sizeof(buf), "密码 %s", waPass());
+  if (waIsOpen()) snprintf(buf, sizeof(buf), "%s", "开放热点 无密码");
+  else            snprintf(buf, sizeof(buf), "密码 %s", waPass());
   drawText(0, ROW1 + 16, buf);
 
   if (waUpFiles() > 0) {
@@ -1027,8 +1028,8 @@ static void drawWebAp() {
       snprintf(buf, sizeof(buf), "已传 %d 个 %luK", waUpFiles(), (unsigned long)(b / 1024));
   } else {
     int c = waClients();
-    if (c > 0) snprintf(buf, sizeof(buf), "%s %d台", waIp(), c);
-    else       snprintf(buf, sizeof(buf), "%s 等连接", waIp());
+    if (c > 0) snprintf(buf, sizeof(buf), "%s %d台 ch%d", waIp(), c, waChannel());
+    else       snprintf(buf, sizeof(buf), "%s ch%d 等连接", waIp(), waChannel());
   }
   drawText(0, ROW1 + 32, buf);
 }
@@ -1270,7 +1271,9 @@ static void handleCmd(char *cmd) {
     logf("WiFi 配置热点（设备自开 AP，连不上时先看这里）\r\n");
     logf("  ap                               热点参数 / 已连台数 / 信道 / 功率\r\n");
     logf("  ap on | off                      开 / 关热点\r\n");
-    logf("  ap restart                       关掉再开（顺带换密码）\r\n");
+    logf("  ap restart                       关掉再开（换密码）\r\n");
+    logf("  ap ch 1|6|11                     换信道（密码不变）\r\n");
+    logf("  ap open | wpa                    临时开成开放网络，排除密码因素\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1301,7 +1304,15 @@ static void handleCmd(char *cmd) {
     else if (args && !strcasecmp(args, "restart")) {
       waEnd(); delay(200); waBegin();
       logf("[命令] 热点已重启\r\n");
-    } else waPrintInfo();
+    }
+    else if (args && !strncasecmp(args, "ch ", 3)) {
+      int ch = atoi(args + 3);
+      if (ch < 1 || ch > 13) logf("[命令] 信道要 1..13\r\n");
+      else { waSetChannel(ch); logf("[命令] 信道 -> %d\r\n", waChannel()); }
+    }
+    else if (args && !strcasecmp(args, "open")) { waSetOpen(true);  logf("[命令] 已切开放网络（无密码）\r\n"); }
+    else if (args && !strcasecmp(args, "wpa"))  { waSetOpen(false); logf("[命令] 已切回 WPA2 密码\r\n"); }
+    else waPrintInfo();
   }
   else if (!strcasecmp(cmd, "ls")) {
     if (!gFsOk) { logf("[命令] 未挂载\r\n"); return; }

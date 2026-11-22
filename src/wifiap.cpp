@@ -32,6 +32,8 @@ static char       gPass[12] = "";
 static char       gLast[48] = "";
 static uint32_t   gUpBytes = 0;
 static int        gUpFiles = 0;
+static int        gChan = 6;      /* 1/6/11 互不重叠，默认 6 */
+static bool       gOpen = false;   /* 开放网络（无密码）诊断用 */
 
 /* 上传中的临时状态 */
 static File     gUpFile;
@@ -191,33 +193,6 @@ static void waOnApEvent(WiFiEvent_t e) {
     case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:   appLog("[AP] 已分配 IP\r\n"); break;
     default: break;
   }
-}
-
-/* softAP 之后把驱动里的默认值改成最能连上的那一组 */
-static void waHardenAp() {
-  wifi_config_t cfg;
-  memset(&cfg, 0, sizeof(cfg));
-  if (esp_wifi_get_config(WIFI_IF_AP, &cfg) != ESP_OK) return;
-
-  cfg.ap.authmode          = WIFI_AUTH_WPA2_PSK;   /* 不用 WPA3/混合，老安卓也能连 */
-  cfg.ap.pmf_cfg.required  = false;
-  cfg.ap.pmf_cfg.capable   = false;
-  cfg.ap.beacon_interval   = 100;
-  cfg.ap.max_connection    = 4;
-  cfg.ap.ssid_hidden       = 0;
-  esp_wifi_set_config(WIFI_IF_AP, &cfg);
-
-  WiFi.softAPbandwidth(WIFI_BW_HT20);                 /* 40MHz 在老手机上是常见坑 */
-  esp_wifi_set_ps(WIFI_PS_NONE);                      /* 热点不能睡 */
-  esp_wifi_set_max_tx_power(84);                      /* 21dBm，单位 0.25dBm */
-
-  uint8_t chan = 0, proto = 0;
-  wifi_bandwidth_t bw;
-  esp_wifi_get_channel(&chan, NULL);
-  esp_wifi_get_protocol(WIFI_IF_AP, &proto);
-  esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
-  appLog("[AP] 信道 %u 带宽 %s 协议 0x%02X\r\n", (unsigned)chan,
-         bw == WIFI_BW_HT40 ? "HT40" : "HT20", (unsigned)proto);
 }
 
 static void sendJson(JsonDocument &doc) {
@@ -391,36 +366,40 @@ static void hTime() {
 
 /* ==================== 开关 ==================== */
 
-void waBegin() {
+/* 这里刻意不再调用 esp_wifi_set_config / esp_wifi_set_bandwidth：
+ * 起完 AP 再改配置，驱动会把接口 Stop/Start 好几遍（串口日志里能看到抖动），
+ * 热点容易停在一个半启动状态——手机既扫不到也连不上。
+ * 所有参数一次交给 softAP()。 */
+static void waStart(bool newPass) {
   if (gOn) return;
-  waMakePass();
-  waMakeSsid();
-  gUpBytes = 0;
-  gUpFiles = 0;
-  gUpOkSize = 0;
-  gUpBad = true;
-  waMsg("等待浏览器");
+  if (newPass || !gPass[0]) { waMakePass(); waMakeSsid(); }
 
-  btEnd();                         /* 单射频芯片：蓝牙先让开，AP 才干净 */
+  gUpBytes  = 0;
+  gUpFiles  = 0;
+  gUpOkSize = 0;
+  gUpBad    = true;
+  waMsg(gOpen ? "开放热点，无密码" : "等待浏览器");
+
+  btEnd();                       /* 单射频芯片：蓝牙先让开 */
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
-  delay(30);                       /* mode 切换后立刻 softAP 偶尔会起不来 */
+  delay(50);
   static bool evHooked = false;
   if (!evHooked) { WiFi.onEvent(waOnApEvent); evHooked = true; }
 
-  /* 手机连不上/扫不到，多半是这几项：
-   *  - 省电模式让 AP 只在需要时才发 beacon
-   *  - 发射功率被压到最低
-   *  - 默认 40MHz 带宽 + WPA2/WPA3 混合，老手机握手失败直接被拒
-   * 所以这里逐项按最保守配置钉死。 */
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  esp_wifi_set_country_code("CN", true);   /* 不设国家码，信道表按最小集来 */
+  /* 发射功率拉满：单位 0.25dBm，84=21dBm。C3 芯片上限就是 21dBm，
+   * 驱动会按芯片能力夹一次（读回来通常是 20dBm），这里给到最大请求值。 */
+  esp_wifi_set_max_tx_power(84);
+  { int8_t p = 0; esp_wifi_get_max_tx_power(&p);
+    appLog("[AP] 发射功率 %d (%.2f dBm)
+", (int)p, p * 0.25); }
 
   bool ok = false;
   for (int i = 0; i < 2 && !ok; i++) {
-    ok = WiFi.softAP(gSsid, gPass, WA_CHANNEL, 0, 4, false,
-                     WIFI_AUTH_WPA2_PSK, WIFI_CIPHER_TYPE_CCMP);
+    ok = gOpen
+       ? WiFi.softAP(gSsid, NULL, gChan, 0, 4, false, WIFI_AUTH_OPEN,    WIFI_CIPHER_TYPE_NONE)
+       : WiFi.softAP(gSsid, gPass, gChan, 0, 4, false, WIFI_AUTH_WPA2_PSK, WIFI_CIPHER_TYPE_CCMP);
     if (!ok) {
       appLog("[AP] softAP 第 %d 次失败，复位射频重试\r\n", i + 1);
       WiFi.mode(WIFI_OFF);
@@ -434,7 +413,6 @@ void waBegin() {
     appLog("[AP] softAP 失败\r\n");
     return;
   }
-  waHardenAp();
 
   gWeb = new WebServer(80);
   gWeb->on("/",             HTTP_GET,  hIndex);
@@ -449,9 +427,29 @@ void waBegin() {
   gWeb->begin();
 
   gOn = true;
-  appLog("[AP] 热点 %s / %s  http://%s\r\n", gSsid, gPass,
-         WiFi.softAPIP().toString().c_str());
+  appLog("[AP] 热点 %s %s 信道 %d  http://%s\r\n", gSsid,
+         gOpen ? "(开放)" : gPass, gChan, WiFi.softAPIP().toString().c_str());
 }
+
+void waBegin() { waStart(true); }
+
+/* 换信道 / 切开放网络：保留当前密码，省得手机上重新输 */
+void waSetChannel(int ch) {
+  if (ch < 1 || ch > 13 || ch == gChan) return;
+  gChan = ch;
+  waEnd();
+  waStart(false);
+}
+
+void waSetOpen(bool open) {
+  if (open == gOpen) return;
+  gOpen = open;
+  waEnd();
+  waStart(false);
+}
+
+int  waChannel() { return gChan; }
+bool waIsOpen()  { return gOpen; }
 
 void waEnd() {
   if (!gOn) return;
@@ -467,33 +465,36 @@ void waPoll() {
   if (gOn && gWeb) gWeb->handleClient();
 }
 
-/* 串口 `ap` 命令用：把热点实际状态打出来 */
+/* 串口 ap 命令用：把热点实际状态打出来 */
 void waPrintInfo() {
   if (!gOn) { appLog("[AP] 未开启\r\n"); return; }
-  wifi_config_t cfg;
-  memset(&cfg, 0, sizeof(cfg));
-  esp_wifi_get_config(WIFI_IF_AP, &cfg);
-  uint8_t chan = 0, proto = 0;
+  /* 注意：esp_wifi_get_channel 的两个参数都不能是 NULL，
+   * 传 NULL 会直接返回 INVALID_ARG，通道号保持初值 0（看上去像没设信道）。 */
+  uint8_t chan = 0;
+  wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+  esp_err_t rc = esp_wifi_get_channel(&chan, &sec);
   int8_t pwr = 0;
-  wifi_bandwidth_t bw = WIFI_BW_HT20;
-  esp_wifi_get_channel(&chan, NULL);
-  esp_wifi_get_protocol(WIFI_IF_AP, &proto);
-  esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
   esp_wifi_get_max_tx_power(&pwr);
-  appLog("[AP] SSID=\"%s\" 密码=\"%s\" MAC=%s\r\n", gSsid, gPass,
-         WiFi.softAPmacAddress().c_str());
+  uint8_t proto = 0;
+  esp_wifi_get_protocol(WIFI_IF_AP, &proto);
+  wifi_bandwidth_t bw = WIFI_BW_HT20;
+  esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
+
+  appLog("[AP] SSID=\"%s\" %s MAC=%s\r\n", gSsid,
+         gOpen ? "开放(无密码)" : gPass, WiFi.softAPmacAddress().c_str());
   appLog("[AP] IP=%s 已连 %d 台\r\n", WiFi.softAPIP().toString().c_str(),
          (int)WiFi.softAPgetStationNum());
-  appLog("[AP] 信道=%u 带宽=%s 协议=0x%02X 功率=%.2fdBm 认证=%d 隐藏=%d\r\n",
-         (unsigned)chan, bw == WIFI_BW_HT40 ? "HT40" : "HT20", (unsigned)proto,
-         pwr * 0.25, (int)cfg.ap.authmode, (int)cfg.ap.ssid_hidden);
+  appLog("[AP] 信道=%u(rc=%d 期望%u) 次信道=%d 带宽=%s 协议=0x%02X 功率=%.2fdBm\r\n",
+         (unsigned)chan, (int)rc, (unsigned)gChan, (int)sec,
+         bw == WIFI_BW_HT40 ? "HT40" : "HT20", (unsigned)proto, pwr * 0.25);
   appLog("[AP] 已传 %d 个文件 %u 字节，剩余空间 %u\r\n", gUpFiles,
          (unsigned)gUpBytes, (unsigned)fsFree());
+  appLog("[AP] 提示：如果手机扫不到，试试 ap ch 6 / ap ch 11，或用 ap open 排除密码因素\r\n");
 }
 
 bool waRunning() { return gOn; }
 const char *waSsid() { return gSsid; }
-const char *waPass() { return gPass; }
+const char *waPass() { return gOpen ? "" : gPass; }
 const char *waIp() {
   static char ip[16] = "192.168.4.1";
   if (gOn) snprintf(ip, sizeof(ip), "%s", WiFi.softAPIP().toString().c_str());

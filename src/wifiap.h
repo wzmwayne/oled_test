@@ -23,3 +23,9 @@ uint32_t waUpBytes();         /* 本次会话累计上传字节 */
 int  waUpFiles();             /* 本次会话成功上传的文件数 */
 const char *waLast();         /* 最近一条操作结果，给屏幕第 4 行用 */
 void waPrintInfo();           /* 串口 `ap`：打印热点实际运行参数 */
+
+/* 现场排查用：换信道 / 临时开成开放网络（保留当前密码），都会重启热点 */
+void waSetChannel(int ch);    /* 1..13 */
+void waSetOpen(bool open);
+int  waChannel();
+bool waIsOpen();
