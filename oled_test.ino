@@ -1274,6 +1274,7 @@ static void handleCmd(char *cmd) {
     logf("  ap restart                       关掉再开（换密码）\r\n");
     logf("  ap ch 1|6|11                     换信道（密码不变）\r\n");
     logf("  ap open | wpa                    临时开成开放网络，排除密码因素\r\n");
+    logf("  ap proto b|bg|abgn               只开 11b / 11b+g / 全开（默认）\r\n");
     logf("==============================\r\n\r\n");
   }
   else if (!strcasecmp(cmd, "light") && args) {
@@ -1312,6 +1313,15 @@ static void handleCmd(char *cmd) {
     }
     else if (args && !strcasecmp(args, "open")) { waSetOpen(true);  logf("[命令] 已切开放网络（无密码）\r\n"); }
     else if (args && !strcasecmp(args, "wpa"))  { waSetOpen(false); logf("[命令] 已切回 WPA2 密码\r\n"); }
+    else if (args && !strncasecmp(args, "proto ", 6)) {
+      const char *p = args + 6;
+      int np = -1;
+      if      (!strcasecmp(p, "b"))    np = WA_PROTO_B;
+      else if (!strcasecmp(p, "bg"))   np = WA_PROTO_BG;
+      else if (!strcasecmp(p, "abgn")) np = WA_PROTO_ALL;
+      if (np < 0) logf("[命令] 用法: ap proto b|bg|abgn\r\n");
+      else { waSetProto((unsigned char)np); logf("[命令] 已切换协议\r\n"); }
+    }
     else waPrintInfo();
   }
   else if (!strcasecmp(cmd, "ls")) {

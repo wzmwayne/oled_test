@@ -1,9 +1,12 @@
 # 自定义分区表：给字库单独切一个 128KB 分区，运行时 mmap 读取
+# 另加 4KB phy 分区存射频校准数据——没有它时 IDF 把校准存进 NVS，
+# 老固件残留的校准 blob 会让 WiFi 带着错误参数起 PHY（BLE 不受影响，
+# 表现为「热点状态正常但手机扫不到」）。
 # name,     type, subtype,  offset,     size
 nvs,        data, nvs,      0x9000,     0x5000
 otadata,    data, ota,      0xe000,     0x2000
 app0,       app,  ota_0,    0x10000,    0x200000
 font,       data, 0x40,     0x210000,   0x20000
-spiffs,     data, spiffs,   0x230000,   0x1C0000
+spiffs,     data, spiffs,   0x230000,   0x1BF000
+phy,        data, phy,      0x3EF000,   0x1000
 coredump,   data, coredump, 0x3F0000,   0x10000
-

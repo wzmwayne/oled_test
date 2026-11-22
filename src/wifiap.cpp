@@ -33,6 +33,7 @@ static char       gLast[48] = "";
 static uint32_t   gUpBytes = 0;
 static int        gUpFiles = 0;
 static int        gChan = 6;      /* 1/6/11 互不重叠，默认 6 */
+static uint8_t    gProto = 0;     /* 0=用驱动默认(11b/g/n)，否则显式设协议 */
 static bool       gOpen = false;   /* 开放网络（无密码）诊断用 */
 
 /* 上传中的临时状态 */
@@ -413,6 +414,11 @@ static void waStart(bool newPass) {
     return;
   }
 
+  if (gProto) {
+    esp_wifi_set_protocol(WIFI_IF_AP, gProto);
+    appLog("[AP] 协议已设为 0x%02X\r\n", (unsigned)gProto);
+  }
+
   gWeb = new WebServer(80);
   gWeb->on("/",             HTTP_GET,  hIndex);
   gWeb->on("/api/info",     HTTP_GET,  hInfo);
@@ -449,6 +455,14 @@ void waSetOpen(bool open) {
 
 int  waChannel() { return gChan; }
 bool waIsOpen()  { return gOpen; }
+
+/* 只开 11b / 11b+g：OFDM 发射有问题时，低速 DSSS 的 beacon 往往还能出来 */
+void waSetProto(uint8_t proto) {
+  if (proto == gProto) return;
+  gProto = proto;
+  waEnd();
+  waStart(false);
+}
 
 void waEnd() {
   if (!gOn) return;

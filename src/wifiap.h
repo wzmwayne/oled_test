@@ -27,5 +27,9 @@ void waPrintInfo();           /* 串口 `ap`：打印热点实际运行参数 */
 /* 现场排查用：换信道 / 临时开成开放网络（保留当前密码），都会重启热点 */
 void waSetChannel(int ch);    /* 1..13 */
 void waSetOpen(bool open);
+void waSetProto(unsigned char proto);   /* 见下面三个常量 */
+#define WA_PROTO_ALL 0   /* 11b/g/n，驱动默认 */
+#define WA_PROTO_B   1   /* 只 11b：最低速 DSSS，最容易被扫到 */
+#define WA_PROTO_BG  3   /* 11b + 11g */
 int  waChannel();
 bool waIsOpen();
