@@ -59,6 +59,7 @@ static char     gUpName[40] = "";
 static uint32_t gUpLen    = 0;      /* 已收字节 */
 static uint32_t gUpHash   = 2166136261u;
 static uint32_t gUpAckLen = 0;      /* 上一次确认的位置/校验 */
+static uint32_t gUpExpect = 0;      /* bopen 声明的总长度，用来给最后一段补 ack */
 static uint32_t gUpAckHash= 2166136261u;
 static uint32_t gBulkChunk = 32768; /* 每段校验大小，默认 32KB */
 
@@ -302,12 +303,21 @@ static void handleJson(const char *in, size_t len) {
           snprintf(gUpName, sizeof(gUpName), "%s", name);
           gUpLen = 0;  gUpHash = 2166136261u;
           gUpAckLen = 0; gUpAckHash = gUpHash;
+          gUpExpect = size;
           resp["ok"] = true;
           resp["msg"] = "开始上传";
           resp["params"]["chunk"] = gBulkChunk;
         }
       }
     }
+
+  } else if (!strcmp(action, "bsync")) {
+    /* 手机等不到 ack 时来问一句：当前收了多少、校验是多少 */
+    resp["ok"] = (bool)gUpFile;
+    resp["msg"] = gUpFile ? "当前进度" : "没有进行中的上传";
+    resp["params"]["len"]  = gUpLen;
+    resp["params"]["hash"] = gUpHash;
+    resp["params"]["expect"] = gUpExpect;
 
   } else if (!strcmp(action, "bbad")) {
     /* 手机发现校验对不上：退回到上一次确认的位置重传 */
@@ -404,6 +414,7 @@ static void handleJson(const char *in, size_t len) {
     gUpName[0] = 0;
     gUpLen = 0;
     gUpAckLen = 0;
+    gUpExpect = 0;
     resp["ok"] = true;
 
   } else if (!strcmp(action, "bdel")) {
@@ -418,6 +429,7 @@ static void handleJson(const char *in, size_t len) {
         gUpName[0] = 0;
         gUpLen = 0;
         gUpAckLen = 0;
+        gUpExpect = 0;
       }
       char path[64];
       snprintf(path, sizeof(path), BOOK_DIR "/%s", name);
@@ -592,7 +604,9 @@ class DatCb : public NimBLECharacteristicCallbacks {
     if (gUpFile.write(d, n) != n) { appLog("[BT] 写盘失败，空间不足？\r\n"); return; }
     gUpLen += (uint32_t)n;
     gUpHash = fnv1a(gUpHash, d, n);
-    if (gUpLen - gUpAckLen >= gBulkChunk) {
+    /* 满一段就回一次；最后一段通常不足 gBulkChunk，靠 gUpExpect 补齐，
+     * 否则手机发完尾巴永远等不到回包（就是那个「等待校验回包超时」）。 */
+    if (gUpLen - gUpAckLen >= gBulkChunk || (gUpExpect && gUpLen >= gUpExpect)) {
       gUpAckLen = gUpLen;
       gUpAckHash = gUpHash;
       bulkAck();

@@ -91,6 +91,8 @@ object BulkUpload {
                     finish(cb, false, open?.msg ?: "设备拒绝开始", 0)
                     return@Thread
                 }
+                LogStore.add(LogStore.Dir.TX,
+                    "bopen " + fileName + " " + total + " 字节")
                 var chunk = open.params?.optInt("chunk", 32768) ?: 32768
                 if (chunk < 4096) chunk = 32768
                 if (BleManager.currentMtu < 200 && chunk > 8192) chunk = 8192
@@ -131,8 +133,20 @@ object BulkUpload {
                     }
                     sent = segEnd
 
-                    val ok = waitAck(sent, 4000)
+                    var ok = waitAck(sent, 4000)
                     if (ok == null) {
+                        /* 可能是尾段没触发回包，主动问一次设备收到哪了 */
+                        val sync = cmd(pin, "bsync", null, 6000)
+                        if (sync?.ok == true) {
+                            val l = sync.params?.optInt("len", -1) ?: -1
+                            val h = sync.params?.optInt("hash", 0) ?: 0
+                            ok = Pair(l, h)
+                            LogStore.add(LogStore.Dir.RX, "bsync len=" + l + " 期望=" + sent)
+                        }
+                    }
+                    if (ok == null) {
+                        LogStore.add(LogStore.Dir.ERR,
+                            "等待校验回包超时：已发 " + sent + " 字节")
                         finish(cb, false, "等待校验回包超时", sent)
                         return@Thread
                     }
@@ -147,10 +161,14 @@ object BulkUpload {
                         sent = confirmed
                         sentHash = confirmedHash
                         Log.w("BulkUpload", "校验不符，回退到 " + sent)
+                        LogStore.add(LogStore.Dir.ERR,
+                            "校验不符 len=" + devLen + "/" + sent +
+                                " hash=" + devHash + "/" + sentHash + "，回退重传")
                         continue
                     }
                     confirmed = sent
                     confirmedHash = sentHash
+                    LogStore.add(LogStore.Dir.RX, "bputack " + sent + " 字节 校验通过")
                     /* 段确认后才推进流控游标，否则 bbad 会退到更早的位置 */
                     ackAt = 0
 
@@ -163,6 +181,7 @@ object BulkUpload {
                     }
                 }
 
+                LogStore.add(LogStore.Dir.TX, "bclose 整本校验")
                 val close = cmd(pin, "bclose",
                     JSONObject().put("size", total).put("hash", totalHash), 20000)
                 val ok = close?.ok == true

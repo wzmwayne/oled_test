@@ -27,7 +27,7 @@ object LogStore {
         fun onLogsCleared()
     }
 
-    private const val MAX = 500
+    private const val MAX = 2000
     private val main = Handler(Looper.getMainLooper())
     private val entries = ArrayList<Entry>()
     private val listeners = CopyOnWriteArrayList<Listener>()
