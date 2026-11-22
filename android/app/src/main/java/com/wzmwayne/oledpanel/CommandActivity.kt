@@ -939,7 +939,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
 
         view.findViewById<MaterialButton>(R.id.btnBookClose).setOnClickListener { dialog.dismiss() }
         view.findViewById<MaterialButton>(R.id.btnBookUpload).setOnClickListener {
-            bookLauncher.launch(arrayOf("text/plain"))
+            bookLauncher.launch(arrayOf("text/plain", "application/octet-stream"))
         }
         loadBooks(adapter, status)
     }
@@ -992,16 +992,25 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             return
         }
 
-        val name = sanitizeBookName(queryDisplayName(uri))
+        /* ezbk / txt 一律转成 .ezzbk（去图片与封面 + LZ4 分块压缩）再传 */
+        val raw = if (Ezzbk.isEzbk(bytes)) Ezzbk.toRaw(bytes) else bytes
+        if (raw.isEmpty()) {
+            toast("正文为空，可能整本都是图片")
+            return
+        }
+        val packed = Ezzbk.wrap(raw)
+        val baseName = queryDisplayName(uri).substringBeforeLast('.').ifBlank { "book" }
+        val name = sanitizeBookName(baseName + ".ezzbk")
 
         /* 先问设备还剩多少空间，避免传到一半 littlefs 写失败 */
         BleManager.send(pin, "fsstat") { res, _ ->
             val free = res?.params?.optLong("free", -1L) ?: -1L
-            val need = bytes.size.toLong() + 4096L
+            val need = packed.size.toLong() + 4096L
             if (free >= 0 && free < need) {
                 toast("设备空间不足：剩余 " + free / 1024 + " KB，需要 " + need / 1024 + " KB")
             } else {
-                startUpload(pin, name, bytes, free)
+                toast("压缩后 " + packed.size / 1024 + " KB（原文 " + raw.size / 1024 + " KB）")
+                startUpload(pin, name, packed, free)
             }
         }
     }

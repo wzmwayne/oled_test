@@ -33,3 +33,8 @@ void rdNext();
 void rdPrev();
 void rdSaveProgress();
 void rdForget(const char *name);      /* 文件被删时清掉它的进度 */
+
+/* ---- 目录（.ezb 里的 # / ## 行）---- */
+int  rdTocCount();
+const char *rdTocName(int i);
+bool rdGotoToc(int i);                /* 跳到第 i 章开头 */
