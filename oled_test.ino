@@ -363,6 +363,13 @@ static int weekdayFromDate(int y, int m, int d) {
 }
 static const char *WEEK_CN[7] = {"日","一","二","三","四","五","六"};
 
+/* weekdayFromDate 返回 0=周日，而课表/APP 的 day 是 1=周一…7=周日。
+   这里统一换算，别在各处再拍 +1。 */
+static int weekdayIso(int y, int m, int d) {
+  int w = weekdayFromDate(y, m, d);
+  return w == 0 ? 7 : w;
+}
+
 static bool dsReadRaw(uint8_t reg, uint8_t *out, uint8_t len) {
   Wire.beginTransmission(DS3231_ADDR);
   Wire.write(reg);
@@ -441,7 +448,7 @@ static bool dsWriteTimeRaw(const RtcTime &t) {
   b[0] = dec2bcd(t.second);
   b[1] = dec2bcd(t.minute);
   b[2] = dec2bcd(t.hour);
-  b[3] = weekdayFromDate(t.year, t.month, t.day) + 1;
+  b[3] = weekdayIso(t.year, t.month, t.day);
   b[4] = dec2bcd(t.day);
   b[5] = dec2bcd(t.month);
   b[6] = dec2bcd(t.year % 100);
@@ -676,7 +683,7 @@ static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
   char line[64], t1[8], t2[8], d1[16];
-  int  today  = weekdayFromDate(gNow.year, gNow.month, gNow.day) + 1;  /* 0=周日 -> 7 */
+  int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
   int  endMin = 0;
   bool hasEnd = ttDayEnd(today, &endMin);
@@ -777,7 +784,7 @@ static int  gSchDay = 0;    /* 0=跟随今天，1..7=指定星期 */
 static int schShowDay() {
   if (gSchDay >= 1 && gSchDay <= 7) return gSchDay;
   if (!gNowOk) return 1;
-  return weekdayFromDate(gNow.year, gNow.month, gNow.day) + 1;
+  return weekdayIso(gNow.year, gNow.month, gNow.day);
 }
 
 /* 列表行：8:05-9:40 高等数学
