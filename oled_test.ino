@@ -99,11 +99,37 @@ static const char *WAKE_NAME[] = {"按键", "倒计时到点", "RTC闹钟", "SQW
 static void toast(const char *m, uint32_t ms);
 
 static void logWrite(const char *buf, size_t len) {
+  /* USB CDC 的一个坑：插着数据线但没打开串口软件时，USB 是枚举成功的
+   * （(bool)Serial 为真），可主机不取数据，发送环形缓冲永远是满的。
+   * 原来每行硬等 50ms，setup 几十行下来就是几秒的「假卡死」；
+   * 一开串口主机开始取数据，立刻恢复正常。
+   *
+   * 现在：能塞多少塞多少，最多等 3ms；连续几次都塞不下就当没人看，
+   * 静音 3 秒（期间只做非阻塞写），3 秒后再试探一次。
+   * 纯供电线根本枚举不到 USB，(bool)Serial 为假，完全不进这段。 */
+  static uint32_t muteUntil = 0;
+  static uint8_t  stuckHits = 0;
+
   if (Serial) {
-    uint32_t t0 = millis();
-    while (Serial.availableForWrite() < (int)len && millis() - t0 < 50) delay(1);
-    if (Serial.availableForWrite() >= (int)len)
-      Serial.write((const uint8_t *)buf, len);
+    if ((int32_t)(millis() - muteUntil) < 0) {
+      int room = Serial.availableForWrite();
+      if (room > 0)
+        Serial.write((const uint8_t *)buf, len <= (size_t)room ? len : (size_t)room);
+    } else {
+      uint32_t t0 = millis();
+      while (Serial.availableForWrite() < (int)len && millis() - t0 < 3) delay(1);
+      int room = Serial.availableForWrite();
+      if (room >= (int)len) {
+        Serial.write((const uint8_t *)buf, len);
+        stuckHits = 0;
+      } else {
+        if (room > 0) Serial.write((const uint8_t *)buf, (size_t)room);
+        if (++stuckHits >= 6) {          /* 攒够 6 次，判定没人读 */
+          muteUntil = millis() + 3000;
+          stuckHits = 0;
+        }
+      }
+    }
   }
   {
     uint32_t t0 = millis();
