@@ -34,6 +34,8 @@ static uint32_t gSize   = 0;
 static uint32_t gStart  = 0;
 static uint32_t gEnd    = 0;
 static char     gLines[RD_LINES][RD_LINE_BYTES];
+static uint8_t  gLineLvl[RD_LINES];     /* 0=正文 1=# 卷 2=## 章 */
+static uint32_t gLineOff[RD_LINES];     /* 该行起始的正文偏移 */
 
 static uint8_t  gBuf[RD_BUF_SIZE];
 static uint32_t gBufPos = 0;
@@ -240,6 +242,8 @@ static uint32_t layout(uint32_t start) {
     char *out = gLines[li];
     int n = 0, w = 0;
     uint32_t p = pos;
+    int      lineLvl = 0;
+    uint32_t lineOff = pos;
 
     while (p < gSize) {
       uint32_t nx = p;
@@ -254,14 +258,20 @@ static uint32_t layout(uint32_t start) {
         continue;
       }
 
-      /* 章节标记行不参与排版（只在目录里出现） */
-      if (cp == '#' && w == 0 && (p == 0 || byteAt(p - 1) == '\n')) {
-        while (p < gSize) {
+      /* 卷/章标题行照常排版：只把行首的 # 去掉，记下级别供高亮用。
+       * 以前是整行跳过，正文里看不到标题，翻到章节开头也认不出在哪。 */
+      if (cp == '#' && w == 0 && lineLvl == 0 &&
+          (p == 0 || byteAt(p - 1) == '\n')) {
+        lineOff = p;
+        uint32_t hp = p;
+        while (hp < gSize) {
           uint32_t nx2;
-          uint32_t c2 = cpAt(p, &nx2);
-          p = nx2;
-          if (c2 == '\n' || c2 == 0) break;
+          uint32_t c2 = cpAt(hp, &nx2);
+          if (c2 != '#') break;
+          lineLvl++;
+          hp = nx2;
         }
+        p = hp;
         continue;
       }
 
@@ -275,15 +285,17 @@ static uint32_t layout(uint32_t start) {
 
     out[n] = 0;
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
+    gLineLvl[li] = (uint8_t)(lineLvl > 2 ? 2 : lineLvl);
+    gLineOff[li] = lineOff;
 
     if (p <= pos) {                       /* 一个字都没排进去，收工 */
       pos = p;
-      for (int k = li + 1; k < RD_LINES; k++) gLines[k][0] = 0;
+      for (int k = li + 1; k < RD_LINES; k++) { gLines[k][0] = 0; gLineLvl[k] = 0; }
       break;
     }
     pos = p;
     if (pos >= gSize) {
-      for (int k = li + 1; k < RD_LINES; k++) gLines[k][0] = 0;
+      for (int k = li + 1; k < RD_LINES; k++) { gLines[k][0] = 0; gLineLvl[k] = 0; }
       break;
     }
   }
@@ -458,6 +470,7 @@ static void closeCurrent() {
   gStart = gEnd = 0;
   gHistN = 0;
   gLines[0][0] = 0;
+  for (int i = 0; i < RD_LINES; i++) { gLineLvl[i] = 0; gLineOff[i] = 0; }
 }
 
 bool rdOpenIndex(int i) {
@@ -579,6 +592,17 @@ const char *rdName() { return gName; }
 uint32_t rdSize()    { return gSize; }
 int rdPercent()      { return gSize ? (int)((uint64_t)gStart * 100 / gSize) : 0; }
 const char *rdLine(int i) { return (i >= 0 && i < RD_LINES) ? gLines[i] : ""; }
+
+uint8_t rdLineLevel(int i)  { return (i >= 0 && i < RD_LINES) ? gLineLvl[i] : 0; }
+uint32_t rdLineOffset(int i){ return (i >= 0 && i < RD_LINES) ? gLineOff[i] : 0; }
+
+/* 当前所在的章节：最后一个起始位置 <= gStart 的目录项 */
+int rdCurrentTocIndex() {
+  int best = 0;
+  for (int i = 0; i < gTocN; i++)
+    if (gTocOff[i] <= gStart) best = i;
+  return best;
+}
 
 void rdSaveProgress() {
   if (!gOpen) return;

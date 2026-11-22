@@ -29,6 +29,9 @@ const char *rdName();
 uint32_t rdSize();
 int  rdPercent();
 const char *rdLine(int i);
+uint8_t  rdLineLevel(int i);          /* 0=正文 1=# 卷标题 2=## 章标题 */
+uint32_t rdLineOffset(int i);         /* 该行对应的正文偏移 */
+int      rdCurrentTocIndex();         /* 当前章节在目录里的下标 */
 void rdNext();
 void rdPrev();
 void rdSaveProgress();

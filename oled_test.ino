@@ -1015,12 +1015,51 @@ static void drawToc() {
   if (first + 3 < n) fillRect(124, 58, 127, 61);
 }
 
+/* 阅读器里标题行的走马灯状态（和主页那条互不干扰） */
+static char     gRdMqText[80] = {0};
+static int      gRdMqOff = 0;
+static uint32_t gRdMqNext = 0;
+
 static void drawReader() {
   if (gRdView == 2 && rdLoaded()) { drawToc(); return; }
   if (gRdView == 0 || !rdLoaded()) { drawBookList(); return; }
 
-  /* 正文：无标题栏，4 行铺满，底部 1px 进度条 */
-  for (int i = 0; i < RD_LINES; i++) drawText(0, i * 15, rdLine(i));
+  /* 正文：无标题栏，4 行铺满，底部 1px 进度条。
+   * 卷/章标题行反白显示；页首那一行是"焦点"，太宽时先停 1 秒再走马灯。 */
+  bool focusUsed = false;
+  for (int i = 0; i < RD_LINES; i++) {
+    const char *s = rdLine(i);
+    int y = i * 15;
+    if (!*s) continue;
+
+    if (rdLineLevel(i) == 0) { drawText(0, y, s); continue; }
+
+    int tw = textWidthScaled(s, 1);
+    bool focus = !focusUsed;
+    focusUsed = true;
+
+    int x = 0;
+    if (tw > SCREEN_W && focus) {
+      uint32_t now = millis();
+      if (strcmp(gRdMqText, s) != 0) {          /* 换了一行标题就重新计时 */
+        snprintf(gRdMqText, sizeof(gRdMqText), "%s", s);
+        gRdMqOff = 0;
+        gRdMqNext = now + 1000;
+      }
+      if ((int32_t)(now - gRdMqNext) >= 0) {
+        gRdMqOff += 2;
+        if (gRdMqOff > tw + 20) { gRdMqOff = 0; gRdMqNext = now + 1000; }
+        else                    { gRdMqNext = now + 45; }
+      }
+      x = -gRdMqOff;
+    } else if (tw <= SCREEN_W && strcmp(gRdMqText, s) != 0) {
+      snprintf(gRdMqText, sizeof(gRdMqText), "%s", s);
+      gRdMqOff = 0;
+    }
+
+    fillRect(0, y, SCREEN_W - 1, y + 13);
+    drawTextMode(x, y, s, 1, false);
+  }
   int w = SCREEN_W * rdPercent() / 100;
   if (w < 1) w = 1;
   hline(0, w - 1, 63);
@@ -1204,7 +1243,12 @@ static void handleKeys() {
         /* 正文：0/1 翻页，# 目录，* 回书目 */
         if (oneS  || oneR)  rdNext();
         if (zeroS || zeroR) rdPrev();
-        if (hashS) { if (rdTocCount() > 0) gRdView = 2; else appToast("无目录", 1200); }
+        if (hashS) {
+          if (rdTocCount() > 0) {
+            gTocSel = rdCurrentTocIndex();   /* 直接定位到正在读的这章 */
+            gRdView = 2;
+          } else appToast("无目录", 1200);
+        }
         if (starS) { rdSaveProgress(); gRdView = 0; rdScan(); }
       }
       break;
