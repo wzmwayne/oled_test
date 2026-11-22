@@ -200,7 +200,6 @@ static void waHardenAp() {
   if (esp_wifi_get_config(WIFI_IF_AP, &cfg) != ESP_OK) return;
 
   cfg.ap.authmode          = WIFI_AUTH_WPA2_PSK;   /* 不用 WPA3/混合，老安卓也能连 */
-  cfg.ap.threshold.authmode = WIFI_AUTH_WPA2_PSK;
   cfg.ap.pmf_cfg.required  = false;
   cfg.ap.pmf_cfg.capable   = false;
   cfg.ap.beacon_interval   = 100;
@@ -217,8 +216,7 @@ static void waHardenAp() {
   esp_wifi_get_channel(&chan, NULL);
   esp_wifi_get_protocol(WIFI_IF_AP, &proto);
   esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
-  appLog("[AP] 信道 %u 带宽 %s 协议 0x%02X
-", (unsigned)chan,
+  appLog("[AP] 信道 %u 带宽 %s 协议 0x%02X\r\n", (unsigned)chan,
          bw == WIFI_BW_HT40 ? "HT40" : "HT20", (unsigned)proto);
 }
 
@@ -482,7 +480,7 @@ void waPrintInfo() {
   esp_wifi_get_protocol(WIFI_IF_AP, &proto);
   esp_wifi_get_bandwidth(WIFI_IF_AP, &bw);
   esp_wifi_get_max_tx_power(&pwr);
-  appLog("[AP] SSID="%s" 密码="%s" MAC=%s\r\n", gSsid, gPass,
+  appLog("[AP] SSID=\"%s\" 密码=\"%s\" MAC=%s\r\n", gSsid, gPass,
          WiFi.softAPmacAddress().c_str());
   appLog("[AP] IP=%s 已连 %d 台\r\n", WiFi.softAPIP().toString().c_str(),
          (int)WiFi.softAPgetStationNum());
