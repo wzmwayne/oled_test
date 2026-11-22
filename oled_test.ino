@@ -60,11 +60,11 @@ static int gTzHour = 8;
 /* SSD1306 对比度 0x00-0xFF。0xCF 偏亮刺眼，降到 0x7F（手册默认）。
  * 嫌暗就调 0x9F，嫌亮就调 0x5F。 */
 #define OLED_CONTRAST 0x7F
-#define BR_MIN 16
-#define BR_MAX 255
-#define BR_STEP 24
+#define BR_LEVELS    100    /* 用户档位 0..100，0 最暗 */
+#define BR_STEP      2
+#define BR_SAVE_MIN  10     /* 低于这个档位只在本次运行生效，不写 flash */
 
-static uint8_t  gContrast    = OLED_CONTRAST;
+static int      gBright       = 72;   /* 用户档位（不是寄存器值） */
 static bool     gContrastDirty = false;
 static uint32_t gContrastSaveAt = 0;
 
@@ -399,40 +399,70 @@ static void drawLoading(const char *title, const char *msg, uint16_t tick) {
     fillRect(px, trackY + 1, px, trackY + trackH - 2);
   }
 }
-/* ---------- 屏幕亮度（对比度 0x81） ---------- */
+/* ---------- 屏幕亮度（对比度 0x81） ----------
+ * 寄存器 0..255 与人眼感知不是线性的：低端挤在一起，高端又差很多。
+ * 所以对外只暴露 0..100 档，按 gamma 2.2 映射到寄存器，
+ * 这样低亮度区间每一档都能看出区别（第 1 档约 1，第 10 档约 16）。 */
+static uint8_t brightToReg(int lv) {
+  if (lv <= 0) return 1;
+  if (lv > BR_LEVELS) lv = BR_LEVELS;
+  int v = (int)(255.0 * pow((double)lv / (double)BR_LEVELS, 2.2) + 0.5);
+  if (v < 1) v = 1;
+  if (v > 255) v = 255;
+  return (uint8_t)v;
+}
+
+/* 反向映射，给串口 contrast 命令用 */
+static int regToBright(int reg) {
+  if (reg <= 0) return 0;
+  if (reg > 255) reg = 255;
+  int lv = (int)(BR_LEVELS * pow((double)reg / 255.0, 1.0 / 2.2) + 0.5);
+  if (lv < 0) lv = 0;
+  if (lv > BR_LEVELS) lv = BR_LEVELS;
+  return lv;
+}
+
 static void contrastApply() {
   oledCmd(0x81);
-  oledCmd(gContrast);
+  oledCmd(brightToReg(gBright));
 }
 
 static void contrastLoad() {
   Preferences p;
   p.begin("cfg", true);
-  int v = p.getInt("bl", -1);
+  int v = p.getInt("br", -1);       /* 新键 "br"：用户档位；旧的 "bl" 是寄存器值，不兼容 */
   p.end();
-  if (v >= BR_MIN && v <= BR_MAX) gContrast = (uint8_t)v;
+  if (v >= 0 && v <= BR_LEVELS) gBright = v;
 }
 
 static void contrastSave() {
   Preferences p;
   p.begin("cfg", false);
-  p.putInt("bl", gContrast);
+  p.putInt("br", gBright);
   p.end();
   gContrastDirty = false;
 }
 
-/* 0 键减、1 键加；连按或长按都按步长走，松手 0.7 秒后落盘 */
+/* 0 键减、1 键加；连按或长按都按步长走 */
 static void contrastStep(int dir) {
-  int v = (int)gContrast + dir * BR_STEP;
-  if (v < BR_MIN) v = BR_MIN;
-  if (v > BR_MAX) v = BR_MAX;
-  if (v == (int)gContrast) return;
-  gContrast = (uint8_t)v;
+  int lv = gBright + dir * BR_STEP;
+  if (lv < 0) lv = 0;
+  if (lv > BR_LEVELS) lv = BR_LEVELS;
+  if (lv == gBright) return;
+  gBright = lv;
   contrastApply();
-  gContrastDirty  = true;
-  gContrastSaveAt = millis() + 700;
-  char b[24];
-  snprintf(b, sizeof(b), "亮度 %d%%", gContrast * 100 / 255);
+
+  char b[32];
+  if (gBright < BR_SAVE_MIN) {
+    /* 太暗的时候多半是临时看，别把它存成开机值 —— 否则下次开机黑着屏
+     * 还以为设备坏了。松手也不落盘，重启回到上次 >=10 的档位。 */
+    gContrastDirty = false;
+    snprintf(b, sizeof(b), "亮度 %d%%（临时，不保存）", gBright);
+  } else {
+    gContrastDirty  = true;
+    gContrastSaveAt = millis() + 700;   /* 松手 0.7s 后再写，避开连按 */
+    snprintf(b, sizeof(b), "亮度 %d%% → 0x%02X", gBright, brightToReg(gBright));
+  }
   appToast(b, 900);
 }
 
@@ -1381,9 +1411,9 @@ static void handleCmd(char *cmd) {
     int v = (int)strtol(args, NULL, 0);
     if (v < 0) v = 0;
     if (v > 255) v = 255;
-    gContrast = (uint8_t)v;
+    gBright = regToBright(v);
     contrastApply();
-    contrastSave();
+    if (gBright >= BR_SAVE_MIN) contrastSave();
     logf("[命令] 对比度设为 0x%02X\r\n", (unsigned)v);
   }
   else if (!strcasecmp(cmd, "loglevel") && args) {
@@ -1456,7 +1486,8 @@ void setup() {
   gOledOk = oledInit();
   contrastLoad();          /* 先读回上次的亮度，再盖掉初始化里的默认值 */
   if (gOledOk) contrastApply();
-  logf("[屏幕] %s @0x%02X 亮度 0x%02X\r\n", gOledOk ? "OK" : "失败", gOledAddr, gContrast);
+  logf("[屏幕] %s @0x%02X 亮度 %d%% (0x%02X)\r\n", gOledOk ? "OK" : "失败",
+       gOledAddr, gBright, brightToReg(gBright));
 
   fontMount();          /* 字库从 font 分区 mmap，失败的话屏幕会显示方块 */
 
