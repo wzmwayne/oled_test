@@ -414,6 +414,26 @@ static void waStart(bool newPass) {
     return;
   }
 
+  /* 起完再对一次账：驱动偶尔会停在 NULL/STA 模式——softAP 返回成功、
+   * 事件也报 AP_START，但 beacon 一个都不发，手机完全扫不到。 */
+  {
+    wifi_mode_t wm = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&wm);
+    uint8_t chk = 0;
+    wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&chk, &sc);
+    appLog("[AP] 模式=%d(2=AP) 信道=%u\r\n", (int)wm, (unsigned)chk);
+    if (wm != WIFI_MODE_AP) {
+      appLog("[AP] 模式不对，强制重设并重启接口\r\n");
+      esp_wifi_set_mode(WIFI_MODE_AP);
+      esp_wifi_start();
+      delay(100);
+      esp_wifi_get_mode(&wm);
+      esp_wifi_get_channel(&chk, &sc);
+      appLog("[AP] 重设后 模式=%d 信道=%u\r\n", (int)wm, (unsigned)chk);
+    }
+  }
+
   if (gProto) {
     esp_wifi_set_protocol(WIFI_IF_AP, gProto);
     appLog("[AP] 协议已设为 0x%02X\r\n", (unsigned)gProto);
@@ -502,6 +522,9 @@ void waPrintInfo() {
          bw == WIFI_BW_HT40 ? "HT40" : "HT20", (unsigned)proto, pwr * 0.25);
   appLog("[AP] 已传 %d 个文件 %u 字节，剩余空间 %u\r\n", gUpFiles,
          (unsigned)gUpBytes, (unsigned)fsFree());
+  appLog("[AP] 芯片 rev=%u  flash=%uKB  空闲堆=%uB\r\n",
+         (unsigned)ESP.getChipRevision(), (unsigned)(ESP.getFlashChipSize() / 1024),
+         (unsigned)ESP.getFreeHeap());
   appLog("[AP] 提示：如果手机扫不到，试试 ap ch 6 / ap ch 11，或用 ap open 排除密码因素\r\n");
 }
 
