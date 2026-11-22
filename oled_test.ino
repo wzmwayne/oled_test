@@ -1353,8 +1353,7 @@ void setup() {
 
   /* 时区必须在任何 RTC 读写之前载入，否则手机下发的时间会差几个小时 */
   gTzHour = btCfgGetTz();
-  logf("[配置] 时区 UTC%+d
-", gTzHour);
+  logf("[配置] 时区 UTC%+d\r\n", gTzHour);
 
   uint8_t st = 0xFF;
   gRtcOk = dsReadRaw(0x0F, &st, 1);
