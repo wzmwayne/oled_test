@@ -392,8 +392,7 @@ static void waStart(bool newPass) {
    * 驱动会按芯片能力夹一次（读回来通常是 20dBm），这里给到最大请求值。 */
   esp_wifi_set_max_tx_power(84);
   { int8_t p = 0; esp_wifi_get_max_tx_power(&p);
-    appLog("[AP] 发射功率 %d (%.2f dBm)
-", (int)p, p * 0.25); }
+    appLog("[AP] 发射功率 %d (%.2f dBm)\r\n", (int)p, p * 0.25); }
 
   bool ok = false;
   for (int i = 0; i < 2 && !ok; i++) {
