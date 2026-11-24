@@ -1064,15 +1064,23 @@ static void drawIdInput() {
  *   0/00   主页        1/01  精确时钟    10  正计时    11  倒计时
  *   111    课表        100   阅读器      101 蓝牙配置  110 同步
  */
-static int idToApp(const char *bits, int len);   /* 定义在后面，这里先声明 */
-
-/* 隐藏编号：前缀之后再按普通编号解析，但目前只开放阅读器 */
-static int idToHiddenApp(const char *bits, int len) {
-  int id = idToApp(bits, len);
-  return (id == APP_READER) ? id : -1;
+/* 应用的三级可见性：
+ *   1) 注册进菜单（MENU_COUNT 以内）      —— 主页 # 选
+ *   2) 不注册、也不隐藏                  —— 直接输 appid 启动
+ *   3) 不注册、且启用高级隐藏            —— 必须「前缀 + appid」才能启动，
+ *                                          且不会被主页长按 * 返回
+ * 隐藏只影响"怎么进"，编号解析本身仍是同一套。
+ */
+static bool appHidden(int id) {
+  switch (id) {
+    case APP_READER: return true;      /* 阅读器：高级隐藏 */
+    default:         return false;
+  }
 }
 
-static int idToApp(const char *bits, int len) {
+
+/* 纯解析：只看位串的值，不看是否隐藏。前导 0 不影响（00100 == 100）*/
+static int idToAppRaw(const char *bits, int len) {
   if (len <= 0) return -1;
   int v = 0;
   for (int i = 0; i < len; i++) v = (v << 1) | (bits[i] - '0');
@@ -1086,6 +1094,20 @@ static int idToApp(const char *bits, int len) {
     case 7: return APP_SCHEDULE;
     default: return -1;
   }
+}
+
+/* 普通输入：隐藏应用不认，必须走前缀 */
+static int idToApp(const char *bits, int len) {
+  int id = idToAppRaw(bits, len);
+  return (id >= 0 && appHidden(id)) ? -1 : id;
+}
+
+/* 前缀之后：切掉前缀按普通规则解析（含前导 0），但只认隐藏应用。
+ * 与普通入口严格互斥：隐藏应用只能用「前缀+appid」进，
+ * 其他应用只能用纯 appid 进。 */
+static int idToHiddenApp(const char *bits, int len) {
+  int id = idToAppRaw(bits, len);
+  return (id >= 0 && appHidden(id)) ? id : -1;
 }
 
 /* 蓝牙配置页：启动中显示加载动画，就绪后显示 PIN 与状态 */
@@ -1263,10 +1285,12 @@ static void drawMenuItem(int y, const char *s, bool sel) {
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
   if (gApp == APP_READER) rdSaveProgress(); /* 离开阅读器先记下读到的位置 */
-  if (gHiddenApp) {
-    if (gLastApp == gApp) gLastApp = -1;    /* 隐藏应用不算"上次应用" */
-  } else if (gApp != APP_HOME) {
-    gLastApp = gApp;
+  if (gApp != APP_HOME) {
+    if (appHidden(gApp)) {
+      if (gLastApp == gApp) gLastApp = -1;  /* 隐藏应用不算"上次应用" */
+    } else {
+      gLastApp = gApp;
+    }
   }
   gHiddenApp = false;
   gApp = APP_HOME;
@@ -1274,14 +1298,14 @@ static void goHome() {
   gLastActivity = millis();
   mqHold();
 }
-static void enterApp(int id, bool hidden = false) {
+static void enterApp(int id) {
   if (id < 0 || id >= APP_COUNT) return;
   if (gApp == APP_BTCONF && id != APP_BTCONF) btEnd();
 
-  /* 隐藏方式进来的应用不进"上次应用"，否则主页长按 * 又能回去 */
-  gHiddenApp = hidden;
-  if (hidden) {
-    if (gLastApp == id) gLastApp = -1;      /* 清掉以前普通访问留下的记录 */
+  /* 隐藏应用永远不进"上次应用"，否则主页长按 * 又能回去 */
+  gHiddenApp = appHidden(id);
+  if (gHiddenApp) {
+    if (gLastApp == id) gLastApp = -1;
   } else if (gApp != APP_HOME && gApp != id) {
     gLastApp = gApp;
   }
@@ -1366,7 +1390,7 @@ static void handleKeys() {
         if (gIdLen <= HID_PREFIX_LEN) { toast("编号不完整", 1500); return; }
         int id = idToHiddenApp(gIdBuf + HID_PREFIX_LEN, gIdLen - HID_PREFIX_LEN);
         logf("[界面] 隐藏 ID -> %s\r\n", id >= 0 ? APP_NAME[id] : "无效");
-        if (id >= 0) enterApp(id, true);
+        if (id >= 0) enterApp(id);
         else { gIdHidden = false; goHome(); toast("无效隐藏编号", 1500); }
         return;
       }
