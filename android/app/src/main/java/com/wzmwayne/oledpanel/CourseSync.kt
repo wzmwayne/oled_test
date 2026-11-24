@@ -64,7 +64,9 @@ object CourseSync {
     ) {
         val bytes = json.toByteArray(Charsets.UTF_8)
         val hash = fnv1a(bytes)
-        val parts = splitBytes(json, FRAG_BYTES)
+        /* 分片预算跟实际 MTU 走：517 时约 450 字节，MTU 谈小了也不会超长写 */
+        val mtu = BleManager.currentMtu.coerceIn(64, 517)
+        val parts = splitBytes(json, (mtu - 3 - ENVELOPE_BYTES).coerceAtLeast(96))
         BleManager.send(pin, "settt", JSONObject().put("reset", true)) { res, _ ->
             if (res?.ok != true) {
                 done(false, "初始化失败：" + (res?.msg ?: "无响应"))
@@ -108,11 +110,15 @@ object CourseSync {
         }
     }
 
-    /** 单片 JSON 正文的 UTF-8 字节上限：加信封后仍要小于 MTU-3（514） */
-    private const val FRAG_BYTES = 400
+    /**
+     * 信封（pin/action/params/data 与转义引号）按 64 字节算，其余留给正文。
+     * 正文按 JSON 转义后的字节计——引号和反斜杠各占 2 字节、控制字符 6 字节，
+     * 否则 400 字节的课表 JSON（每条约 14 个引号）转义后能到 560 B，写不过去。
+     */
+    private const val ENVELOPE_BYTES = 64
 
-    /** 按 UTF-8 字节切片（不劈开多字节字符，也不劈开代理对） */
-    private fun splitBytes(s: String, maxBytes: Int): List<String> {
+    /** 按线上字节切片（不劈开多字节字符，也不劈开代理对） */
+    private fun splitBytes(s: String, maxCost: Int): List<String> {
         val out = ArrayList<String>()
         val sb = StringBuilder()
         var used = 0
@@ -120,19 +126,21 @@ object CourseSync {
         while (i < s.length) {
             val cp = Character.codePointAt(s, i)
             val n = Character.charCount(cp)
-            val b = when {
+            val cost = when {
+                cp == '"'.code || cp == '\\'.code -> 2
+                cp < 0x20 -> 6
                 cp < 0x80 -> 1
                 cp < 0x800 -> 2
                 cp < 0x10000 -> 3
                 else -> 4
             }
-            if (used + b > maxBytes && sb.isNotEmpty()) {
+            if (used + cost > maxCost && sb.isNotEmpty()) {
                 out.add(sb.toString())
                 sb.setLength(0)
                 used = 0
             }
             sb.appendRange(s, i, i + n)
-            used += b
+            used += cost
             i += n
         }
         if (sb.isNotEmpty()) out.add(sb.toString())
