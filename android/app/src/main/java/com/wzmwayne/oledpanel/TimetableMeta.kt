@@ -9,6 +9,7 @@ import java.util.Locale
  *
  * {"v":1,"c":[{"n":"数学","d":1,"s":"08:00","e":"08:40","p":0}]}
  *   n 课程名  d 星期(1-7)  s/e 起止 "HH:MM" 或分钟数  p 0每周 1单周 2双周
+ *   g 1=全局事件（追加在主页滚动条末尾）。s==e 表示事件（单点时间）
  */
 object TimetableMeta {
 
@@ -21,6 +22,7 @@ object TimetableMeta {
             o.put("s", hhmm(c.start))
             o.put("e", hhmm(c.end))
             o.put("p", c.parity)
+            if (c.global == 1) o.put("g", 1)      /* 全局事件 */
             arr.put(o)
         }
         val root = JSONObject()
@@ -39,6 +41,7 @@ object TimetableMeta {
             o.put("s", c.start)
             o.put("e", c.end)
             o.put("p", c.parity)
+            if (c.global == 1) o.put("g", 1)
             arr.put(o)
         }
         val root = JSONObject()
@@ -61,10 +64,12 @@ object TimetableMeta {
                 val day = o.optInt("d", o.optInt("day", 0))
                 if (day !in 1..7) continue
                 val s = parseTime(o.opt("s") ?: o.opt("start")) ?: continue
-                val e = parseTime(o.opt("e") ?: o.opt("end")) ?: continue
-                if (e <= s || e > 1439) continue
+                /* 事件可以只给开始时间：缺 e 或 e==s 都当单点 */
+                val e = parseTime(o.opt("e") ?: o.opt("end")) ?: s
+                if (e < s || e > 1439) continue
                 val p = o.optInt("p", o.optInt("parity", 0)).coerceIn(0, 2)
-                out.add(Course(out.size, truncateUtf8(name, 24), day, s, e, p))
+                val g = if (o.optInt("g", o.optInt("global", 0)) != 0) 1 else 0
+                out.add(Course(out.size, truncateUtf8(name, 24), day, s, e, p, g))
             }
             out
         } catch (e: Exception) {

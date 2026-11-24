@@ -40,7 +40,8 @@ object CourseSync {
                         o.optInt("day", 1),
                         o.optInt("start", 0),
                         o.optInt("end", 0),
-                        o.optInt("parity", 0)
+                        o.optInt("parity", 0),
+                        o.optInt("global", 0)
                     )
                 )
                 added++
@@ -141,6 +142,7 @@ object CourseSync {
             .put("start", c.start)
             .put("end", c.end)
             .put("parity", c.parity)
+            .put("global", c.global)
         BleManager.send(pin, "addcourse", params) { res, _ ->
             if (res?.ok != true) {
                 done(false, "第 " + (i + 1) + " 门失败：" + (res?.msg ?: "无响应"))

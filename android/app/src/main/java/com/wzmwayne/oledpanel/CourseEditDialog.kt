@@ -5,6 +5,7 @@ import android.content.Context
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.ArrayAdapter
+import android.widget.CheckBox
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
@@ -31,6 +32,8 @@ object CourseEditDialog {
         var parity = initial?.parity ?: 0
         var startMin = initial?.start ?: (8 * 60)
         var endMin = initial?.end ?: (9 * 60 + 40)
+        var isEvent = initial?.isEvent ?: false
+        var isGlobal = (initial?.global ?: 0) == 1
 
         val dayLabels = Course.DAY_NAMES.toList()
         acDay.setAdapter(ArrayAdapter(ctx, android.R.layout.simple_list_item_1, dayLabels))
@@ -52,6 +55,10 @@ object CourseEditDialog {
             TimePickerDialog(ctx, { _, h, m ->
                 startMin = h * 60 + m
                 etStart.setText(formatMin(startMin))
+                if (isEvent) {                 /* 事件只有单点，结束时间跟着走 */
+                    endMin = startMin
+                    etEnd.setText(formatMin(startMin))
+                }
             }, startMin / 60, startMin % 60, true).show()
         }
         etEnd.setOnClickListener {
@@ -61,8 +68,38 @@ object CourseEditDialog {
             }, endMin / 60, endMin % 60, true).show()
         }
 
+        /* 事件与全局开关：动态挂到内容容器末尾，免去改 layout */
+        val container = (view as android.view.ViewGroup).getChildAt(0) as android.view.ViewGroup
+        val cbEvent = CheckBox(ctx).apply {
+            text = "这是事件（单点时间，只用开始时间）"
+            isChecked = isEvent
+        }
+        val cbGlobal = CheckBox(ctx).apply {
+            text = "全局事件（始终追加在主页滚动条末尾，如「放学」）"
+            isChecked = isGlobal
+            visibility = if (isEvent) View.VISIBLE else View.GONE
+        }
+        container.addView(cbEvent)
+        container.addView(cbGlobal)
+
+        fun syncEventUi() {
+            etEnd.isEnabled = !isEvent
+            if (isEvent) {
+                endMin = startMin
+                etEnd.setText(formatMin(startMin))
+            }
+            cbGlobal.visibility = if (isEvent) View.VISIBLE else View.GONE
+        }
+        syncEventUi()
+
+        cbEvent.setOnCheckedChangeListener { _, checked ->
+            isEvent = checked
+            syncEventUi()
+        }
+        cbGlobal.setOnCheckedChangeListener { _, checked -> isGlobal = checked }
+
         val dialog = MaterialAlertDialogBuilder(ctx)
-            .setTitle(if (initial == null) "添加课程" else "编辑课程")
+            .setTitle(if (initial == null) "添加课程 / 事件" else "编辑课程 / 事件")
             .setView(view)
             .create()
 
@@ -87,12 +124,14 @@ object CourseEditDialog {
                 return@setOnClickListener
             }
             tilName.error = null
-            if (startMin >= endMin) {
+            if (!isEvent && startMin >= endMin) {
                 tilEnd.error = "结束时间必须晚于开始时间"
                 return@setOnClickListener
             }
             tilEnd.error = null
-            onSave(Course(initial?.index ?: -1, name, day, startMin, endMin, parity))
+            val realEnd = if (isEvent) startMin else endMin
+            val g = if (isEvent && isGlobal) 1 else 0
+            onSave(Course(initial?.index ?: -1, name, day, startMin, realEnd, parity, g))
             dialog.dismiss()
         }
 
