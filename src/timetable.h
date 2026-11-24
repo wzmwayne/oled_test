@@ -1,9 +1,11 @@
 /*
  * timetable.h - 课表存储与查询
  *
- * 数据量很小（最多 60 条），整体以 JSON 存在 LittleFS 的 /tt.json：
- *   {"c":[{"n":"高等数学","d":3,"s":480,"e":580,"p":0}, ...]}
- *   n=课程名  d=星期(1..7)  s/e=距 00:00 的分钟  p=0每周 1单周 2双周
+ * 数据量很小（最多 TT_MAX 条），整体以 JSON 存在 LittleFS 的 /tt.json：
+ *   {"c":[{"n":"高等数学","d":3,"s":480,"e":580,"p":0},
+ *         {"n":"午餐","d":1,"s":730,"e":730,"g":1}]}
+ *   n=课程名  d=星期(1..7)  s/e=距 00:00 的分钟（s==e 是事件）
+ *   p=0每周 1单周 2双周   g=1 全局事件（只追加在主页行尾）
  *
  * 为什么用 LittleFS 而不是 NVS：NVS 单个 String 有长度上限，且课表是
  * 整表覆盖写，放文件里更直观、也方便以后导出来看。
@@ -28,9 +30,14 @@ void  ttBegin();                                  /* LittleFS 挂载后调用，
 int   ttCount();
 const TtCourse *ttGet(int i);
 
-/* 整表替换：解析 {"c":[{"n","d","s","e","p"}]}，成功返回条数，失败 -1。
- * 这是「发课表」的唯一入口，解析成功后一次性落盘。 */
+/* 整表替换：解析 {"c":[{"n","d","s","e","p","g"}]}，成功返回条数，失败 -1。
+ * 解析成功才动 gTt 并落盘，失败时旧课表原样保留。 */
 int   ttLoadJson(const char *json, size_t len);
+
+class Stream;
+/* 同上，但从流里边读边解（蓝牙课表先落盘成 /tt.tmp，提交时走这条，
+ * 不再需要把整表 JSON 驻留内存）。 */
+int   ttLoadStream(Stream &s);
 
 int   ttAdd(const char *name, int day, int start, int end, int parity);
 /* end==start 表示事件（单点）；global=1 时该事件追加在主页行尾 */

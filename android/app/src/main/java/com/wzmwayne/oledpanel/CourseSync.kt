@@ -52,7 +52,8 @@ object CourseSync {
     }
 
     /**
-     * 整表下发：settt 分片追加，最后 end 提交。
+     * 整表下发：settt 分片追加（设备边收边落盘），最后带 size + FNV-1a 哈希提交。
+     * 设备校验不过就整份丢弃、旧课表不动，所以这里失败可以整表重发。
      * 固件只有「取课表 / 发课表」两条通道，不再逐条 addcourse。
      */
     fun pushJson(
@@ -61,13 +62,28 @@ object CourseSync {
         onProgress: (Int, Int) -> Unit,
         done: (Boolean, String?) -> Unit
     ) {
-        val parts = split(json, 300)
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        val hash = fnv1a(bytes)
+        val parts = splitBytes(json, FRAG_BYTES)
         BleManager.send(pin, "settt", JSONObject().put("reset", true)) { res, _ ->
             if (res?.ok != true) {
                 done(false, "初始化失败：" + (res?.msg ?: "无响应"))
                 return@send
             }
-            sendPart(pin, parts, 0, onProgress, done)
+            sendPart(pin, parts, 0, onProgress) { ok, err ->
+                if (!ok) {
+                    done(false, err)
+                    return@sendPart
+                }
+                val end = JSONObject()
+                    .put("end", true)
+                    .put("size", bytes.size)
+                    .put("hash", hash)
+                BleManager.send(pin, "settt", end) { r2, _ ->
+                    if (r2?.ok == true) done(true, null)
+                    else done(false, r2?.msg ?: "提交失败")
+                }
+            }
         }
     }
 
@@ -79,10 +95,7 @@ object CourseSync {
         done: (Boolean, String?) -> Unit
     ) {
         if (i >= parts.size) {
-            BleManager.send(pin, "settt", JSONObject().put("end", true)) { res, _ ->
-                if (res?.ok == true) done(true, null)
-                else done(false, res?.msg ?: "提交失败")
-            }
+            done(true, null)
             return
         }
         BleManager.send(pin, "settt", JSONObject().put("data", parts[i])) { res, _ ->
@@ -95,17 +108,45 @@ object CourseSync {
         }
     }
 
-    /** 按字符切片，避免把代理对劈开 */
-    private fun split(s: String, size: Int): List<String> {
+    /** 单片 JSON 正文的 UTF-8 字节上限：加信封后仍要小于 MTU-3（514） */
+    private const val FRAG_BYTES = 400
+
+    /** 按 UTF-8 字节切片（不劈开多字节字符，也不劈开代理对） */
+    private fun splitBytes(s: String, maxBytes: Int): List<String> {
         val out = ArrayList<String>()
+        val sb = StringBuilder()
+        var used = 0
         var i = 0
         while (i < s.length) {
-            var end = minOf(i + size, s.length)
-            if (end < s.length && Character.isHighSurrogate(s[end - 1])) end--
-            out.add(s.substring(i, end))
-            i = end
+            val cp = Character.codePointAt(s, i)
+            val n = Character.charCount(cp)
+            val b = when {
+                cp < 0x80 -> 1
+                cp < 0x800 -> 2
+                cp < 0x10000 -> 3
+                else -> 4
+            }
+            if (used + b > maxBytes && sb.isNotEmpty()) {
+                out.add(sb.toString())
+                sb.setLength(0)
+                used = 0
+            }
+            sb.appendRange(s, i, i + n)
+            used += b
+            i += n
         }
+        if (sb.isNotEmpty()) out.add(sb.toString())
         return out
+    }
+
+    /** FNV-1a 32 位，与固件 fnv1a() 同一算法（初值 2166136261，乘 16777619） */
+    private fun fnv1a(data: ByteArray): Long {
+        var h = 2166136261L
+        for (b in data) {
+            h = (h xor (b.toLong() and 0xFF)) and 0xFFFFFFFFL
+            h = (h * 16777619L) and 0xFFFFFFFFL
+        }
+        return h
     }
 
     /** 先 cleartt 再逐条 addcourse，等于整张表覆盖 */

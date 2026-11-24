@@ -105,18 +105,24 @@ void btCfgSetTz(int tz) {
 
 
 /* ==================== 课表整体下发 ====================
- * 一次 BLE 写放不下整张表，按「追加 → 结束」两段式：
- *   {"action":"settt","params":{"data":"<JSON 片段>"}}   多次追加
- *   {"action":"settt","params":{"end":true}}             解析并整表替换
- *   {"action":"settt","params":{"reset":true}}           丢弃缓冲
+ * 一次 BLE 写放不下整张表，按「追加 → 结束」两段式；分片边收边落盘，
+ * 不再整表驻留内存，条数只受 flash 剩余空间限制：
+ *   {"action":"settt","params":{"reset":true}}                   清暂存文件
+ *   {"action":"settt","params":{"data":"<JSON 片段>"}}           多次追加，回 len/hash
+ *   {"action":"settt","params":{"end":true,"size":N,"hash":H}}   校验后流式解析并整表替换
+ * hash 是整表 JSON 的 FNV-1a 32 位（与传书同一个函数）：对不上就整份丢弃，
+ * 旧课表一个字都不动。size/hash 传 0 或缺省时不校验，兼容老客户端。
  */
-#define TT_JSON_MAX 6144
-static char    *gTtBuf = nullptr;
-static uint32_t gTtBufLen = 0;
+#define TT_TMP           "/tt.tmp"
+#define TT_TMP_MAX       65536    /* 暂存上限 64KB（约 1500 条），防跑飞把 flash 写满 */
+#define TT_TMP_FREE_MIN  16384    /* reset 时要求至少这么多空闲，免得写到一半满 */
+static uint32_t gTtBytes = 0;
+static uint32_t gTtHash  = 2166136261u;   /* FNV-1a 初值，与传书一致 */
 
-static void ttBufFree() {
-  if (gTtBuf) { free(gTtBuf); gTtBuf = nullptr; }
-  gTtBufLen = 0;
+static void ttTmpClear() {
+  LittleFS.remove(TT_TMP);
+  gTtBytes = 0;
+  gTtHash  = 2166136261u;
 }
 
 /* ==================== 书籍上传（base64 分块） ==================== */
@@ -457,47 +463,72 @@ static void handleJson(const char *in, size_t len) {
 
   } else if (!strcmp(action, "settt")) {
     if (params["reset"] | false) {
-      ttBufFree();
-      resp["ok"] = true;
-      resp["msg"] = "缓冲已清空";
-      resp["params"]["len"] = 0;
+      ttTmpClear();                       /* 先把上次可能残留的暂存删掉再算空间 */
+      size_t freeB = LittleFS.totalBytes() - LittleFS.usedBytes();
+      if (freeB < TT_TMP_FREE_MIN) {
+        resp["ok"] = false;
+        resp["msg"] = "空间不足";
+      } else {
+        resp["ok"] = true;
+        resp["msg"] = "暂存已清空";
+        resp["params"]["len"] = 0;
+      }
+
     } else if (params["end"] | false) {
-      if (!gTtBuf || gTtBufLen == 0) {
+      uint32_t size = params["size"] | 0;
+      uint32_t hash = params["hash"] | 0;
+      if (gTtBytes == 0) {
+        ttTmpClear();
         resp["ok"] = false;
         resp["msg"] = "没有收到任何数据";
+      } else if ((size && size != gTtBytes) || (hash && hash != gTtHash)) {
+        /* 半路丢包/写坏都算到这里：整份丢弃，旧课表原样保留 */
+        resp["ok"] = false;
+        resp["msg"] = "长度或校验值不符，已丢弃";
+        resp["params"]["len"]  = gTtBytes;
+        resp["params"]["hash"] = gTtHash;
+        ttTmpClear();
       } else {
-        int n = ttLoadJson(gTtBuf, gTtBufLen);
-        if (n < 0) {
-          resp["ok"] = false;
-          resp["msg"] = "JSON 解析失败或格式不对";
-        } else {
-          resp["ok"] = true;
-          resp["msg"] = "课表已整体写入";
-          resp["params"]["count"] = n;
-        }
-        ttBufFree();
+        File f = LittleFS.open(TT_TMP, "r");
+        bool haveFile = (bool)f;
+        int n = haveFile ? ttLoadStream(f) : -1;   /* 边读边解，不再整表进内存 */
+        if (haveFile) f.close();
+        resp["ok"] = (n >= 0);
+        resp["msg"] = (n >= 0) ? "课表已整体写入"
+                              : (haveFile ? "JSON 解析失败或格式不对" : "暂存文件打不开");
+        if (n >= 0) resp["params"]["count"] = n;
+        ttTmpClear();
       }
+
     } else {
       const char *chunk = params["data"] | "";
       size_t clen = strlen(chunk);
       if (clen == 0) {
         resp["ok"] = false;
         resp["msg"] = "空片段";
+      } else if (gTtBytes + clen > TT_TMP_MAX) {
+        ttTmpClear();
+        resp["ok"] = false;
+        resp["msg"] = "课表超过 64KB，请减少条数";
       } else {
-        if (!gTtBuf) gTtBuf = (char *)malloc(TT_JSON_MAX);
-        if (!gTtBuf) {
+        bool wrote = false;
+        {
+          File f = LittleFS.open(TT_TMP, "a");     /* 追加写，写完就关，别跨命令持句柄 */
+          if (f) {
+            wrote = (f.write((const uint8_t *)chunk, clen) == clen);
+            f.close();
+          }
+        }
+        if (!wrote) {
+          ttTmpClear();
           resp["ok"] = false;
-          resp["msg"] = "内存不足";
-        } else if (gTtBufLen + clen >= TT_JSON_MAX) {
-          ttBufFree();
-          resp["ok"] = false;
-          resp["msg"] = "课表超过 6KB，请精简课程名或减少条数";
+          resp["msg"] = "写暂存文件失败（空间不足？）";
         } else {
-          memcpy(gTtBuf + gTtBufLen, chunk, clen);
-          gTtBufLen += clen;
-          gTtBuf[gTtBufLen] = 0;
+          gTtBytes += (uint32_t)clen;
+          gTtHash = fnv1a(gTtHash, (const uint8_t *)chunk, clen);
           resp["ok"] = true;
-          resp["params"]["len"] = gTtBufLen;
+          resp["params"]["len"]  = gTtBytes;
+          resp["params"]["hash"] = gTtHash;
         }
       }
     }
@@ -697,6 +728,7 @@ static void btStartTask(void *arg) {
 void btBegin() {
   if (gState != BT_STOPPED) return;
   gPinErr = 0;
+  ttTmpClear();     /* 上次传课表如果没走完，暂存文件在这儿回收 */
   /* 100000-999999，保证首位非 0，手机配对框不会因为前导零判为不足 6 位 */
   snprintf(gPin, sizeof(gPin), "%06u", (unsigned)(100000u + (esp_random() % 900000u)));
   gState = BT_STARTING;

@@ -127,12 +127,9 @@ int ttAddEx(const char *name, int day, int start, int end, int parity, int globa
   return pos;
 }
 
-/* 整表替换：先校验再写 gTt，最后统一排序落盘，避免写一半断电 */
-int ttLoadJson(const char *json, size_t len) {
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, json, len);
-  if (err) return -1;
-
+/* 把解析好的 DOM 落进 gTt：逐条校验、排序、整表落盘。
+ * 任何一条不合法就跳过它（不整表失败），条数上限 TT_MAX。 */
+static int ttCommit(JsonDocument &doc) {
   JsonArray arr = doc["c"].as<JsonArray>();
   int k = 0;
   for (JsonObject o : arr) {
@@ -162,6 +159,20 @@ int ttLoadJson(const char *json, size_t len) {
   }
   ttSave();
   return gTtN;
+}
+
+/* 整表替换：先解析再写 gTt，最后统一排序落盘，避免写一半断电 */
+int ttLoadJson(const char *json, size_t len) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json, len)) return -1;
+  return ttCommit(doc);
+}
+
+/* 流式整表替换：文件当输入，边读边解，字符串由 ArduinoJson 各自分配 */
+int ttLoadStream(Stream &s) {
+  JsonDocument doc;
+  if (deserializeJson(doc, s)) return -1;
+  return ttCommit(doc);
 }
 
 bool ttDel(int i) {
