@@ -957,6 +957,25 @@ static int schShowDay() {
   return weekdayIso(gNow.year, gNow.month, gNow.day);
 }
 
+/* 把光标落在"正在上"或"下一个"的课/事件上。
+ * 课程看 end > now（含正在进行），事件是单点，看 start >= now。 */
+static void schFocusNow() {
+  int idx[TT_MAX];
+  int n = ttDayList(schShowDay(), idx, TT_MAX);
+  if (n <= 0) { gSchSel = 0; return; }
+  if (!gNowOk || gSchDay != 0) { gSchSel = 0; return; }   /* 非今天就不猜 */
+
+  int nowMin = (int)gNow.hour * 60 + gNow.minute;
+  for (int i = 0; i < n; i++) {
+    const TtCourse *c = ttGet(idx[i]);
+    if (!c) continue;
+    bool hit = (c->start == c->end) ? ((int)c->start >= nowMin)
+                                    : ((int)c->end > nowMin);
+    if (hit) { gSchSel = i; return; }
+  }
+  gSchSel = n - 1;          /* 今天已经上完，停在最后一节 */
+}
+
 /* 列表行：8:05-9:40 高等数学
  * 128px 里时间要占 63~77px，课名放不下就截断；选中行反白。 */
 static void drawSchedule() {
@@ -1236,6 +1255,11 @@ static void enterApp(int id) {
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
   if (id == APP_READER) { gRdView = 0; gRdSel = 0; rdScan(); }  /* 先进书目 */
+  if (id == APP_SCHEDULE) {                 /* 进课表就落在当前这节上 */
+    gSchDay = 0;
+    gSchSel = 0;
+    schFocusNow();
+  }
 }
 
 /* ==================== 按键分发 ==================== */
@@ -1342,8 +1366,8 @@ static void handleKeys() {
       int n = ttDayList(schShowDay(), idx, TT_MAX);
       if ((zeroS || zeroR) && gSchSel > 0)     gSchSel--;
       if ((oneS  || oneR)  && gSchSel < n - 1) gSchSel++;
-      if (hashL) { gSchDay = 0; gSchSel = 0; }
-      else if (hashS) { gSchDay = (gSchDay + 1) % 8; gSchSel = 0; }
+      if (hashL) { gSchDay = 0; gSchSel = 0; schFocusNow(); }
+      else if (hashS) { gSchDay = (gSchDay + 1) % 8; gSchSel = 0; schFocusNow(); }
       if (starS) goHome();
       break;
     }
