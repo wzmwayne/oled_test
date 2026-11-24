@@ -450,6 +450,43 @@ static void handleJson(const char *in, size_t len) {
       resp["msg"] = ok ? "已删除" : "文件不存在";
     }
 
+  } else if (!strcmp(action, "listev")) {
+    JsonArray arr = resp["params"]["events"].to<JsonArray>();
+    for (int i = 0; i < ttEvCount(); i++) {
+      const TtEvent *e = ttEvGet(i);
+      JsonObject o = arr.add<JsonObject>();
+      o["n"] = e->name;
+      o["d"] = e->day;
+      o["t"] = e->at;
+      o["g"] = e->global;
+    }
+    resp["ok"] = true;
+    resp["params"]["count"] = ttEvCount();
+
+  } else if (!strcmp(action, "addev")) {
+    /* {"name":"升旗","day":1,"at":460,"global":0} */
+    const char *n = params["name"] | "";
+    int d = params["day"]   | 1;
+    int t = params["at"]    | -1;
+    int g = params["global"] | 0;
+    int idx = ttEvAdd(n, d, t, g);
+    resp["ok"] = (idx >= 0);
+    resp["msg"] = (idx >= 0) ? "已添加" : "参数不合法或已满(24条)";
+    resp["params"]["count"] = ttEvCount();
+
+  } else if (!strcmp(action, "delev")) {
+    int i = params["index"] | -1;
+    bool ok = ttEvDel(i);
+    resp["ok"] = ok;
+    resp["msg"] = ok ? "已删除" : "序号无效";
+    resp["params"]["count"] = ttEvCount();
+
+  } else if (!strcmp(action, "clearev")) {
+    ttEvClear();
+    resp["ok"] = true;
+    resp["msg"] = "事件已清空";
+    resp["params"]["count"] = 0;
+
   } else if (!strcmp(action, "settt")) {
     if (params["reset"] | false) {
       ttBufFree();

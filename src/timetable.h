@@ -23,6 +23,23 @@ typedef struct {
   uint8_t  parity;   /* 0=每周 1=单周 2=双周 */
 } TtCourse;
 
+/* ---- 事件：单个时间点（不是时间段）----
+ * global=1 全局事件：始终追加在主页课表滚动条末尾（如"放学"）
+ * global=0 普通事件：只在发生前追加（过了就不再提示，如"升旗"） */
+#define TT_EV_MAX    24
+typedef struct {
+  char     name[TT_NAME_MAX];
+  uint8_t  day;      /* 1=周一 .. 7=周日 */
+  uint16_t at;       /* 距 00:00 的分钟数 */
+  uint8_t  global;   /* 1=全局 0=普通 */
+} TtEvent;
+
+int  ttEvCount();
+const TtEvent *ttEvGet(int i);
+int  ttEvAdd(const char *name, int day, int at, int global);   /* 返回下标，-1 失败 */
+bool ttEvDel(int i);
+void ttEvClear();
+
 void  ttBegin();                                  /* LittleFS 挂载后调用，读 /tt.json */
 int   ttCount();
 const TtCourse *ttGet(int i);

@@ -11,6 +11,8 @@
 
 static TtCourse gTt[TT_MAX];
 static int      gTtN = 0;
+static TtEvent  gEv[TT_EV_MAX];
+static int      gEvN = 0;
 
 /* ==================== 日期工具（Howard Hinnant 算法） ==================== */
 static int32_t daysFromCivil(int y, unsigned m, unsigned d) {
@@ -59,11 +61,48 @@ static bool ttSave() {
     o["e"] = gTt[i].end;
     o["p"] = gTt[i].parity;
   }
+  JsonArray ea = doc["e"].to<JsonArray>();
+  for (int i = 0; i < gEvN; i++) {
+    JsonObject o = ea.add<JsonObject>();
+    o["n"] = gEv[i].name;
+    o["d"] = gEv[i].day;
+    o["t"] = gEv[i].at;
+    o["g"] = gEv[i].global;
+  }
+
   File f = LittleFS.open("/tt.json", "w");
   if (!f) return false;
   size_t n = serializeJson(doc, f);
   f.close();
   return n > 0;
+}
+
+/* ==================== 事件 ==================== */
+static void evSort() {
+  for (int i = 1; i < gEvN; i++) {
+    TtEvent v = gEv[i];
+    int j = i - 1;
+    while (j >= 0 && (gEv[j].day > v.day || (gEv[j].day == v.day && gEv[j].at > v.at))) {
+      gEv[j + 1] = gEv[j];
+      j--;
+    }
+    gEv[j + 1] = v;
+  }
+}
+
+static void evParse(JsonDocument &doc) {
+  gEvN = 0;
+  for (JsonObject o : doc["e"].as<JsonArray>()) {
+    if (gEvN >= TT_EV_MAX) break;
+    TtEvent e;
+    memset(&e, 0, sizeof(e));
+    snprintf(e.name, sizeof(e.name), "%s", (const char *)(o["n"] | ""));
+    e.day    = (uint8_t)(o["d"] | 0);
+    e.at     = (uint16_t)(o["t"] | 0);
+    e.global = (uint8_t)((o["g"] | 0) ? 1 : 0);
+    if (!e.name[0] || e.day < 1 || e.day > 7 || e.at > 1439) continue;
+    gEv[gEvN++] = e;
+  }
 }
 
 void ttBegin() {
@@ -89,7 +128,38 @@ void ttBegin() {
     if (c.start >= c.end || c.end > 1439 || c.parity > 2) continue;
     gTt[gTtN++] = c;
   }
+
+  evParse(doc);
+  evSort();
 }
+
+int  ttEvCount() { return gEvN; }
+const TtEvent *ttEvGet(int i) { return (i >= 0 && i < gEvN) ? &gEv[i] : nullptr; }
+
+int ttEvAdd(const char *name, int day, int at, int global) {
+  if (!name || !*name || gEvN >= TT_EV_MAX) return -1;
+  if (day < 1 || day > 7 || at < 0 || at > 1439) return -1;
+  TtEvent e;
+  memset(&e, 0, sizeof(e));
+  snprintf(e.name, sizeof(e.name), "%s", name);
+  e.day    = (uint8_t)day;
+  e.at     = (uint16_t)at;
+  e.global = global ? 1 : 0;
+  gEv[gEvN++] = e;
+  evSort();
+  ttSave();
+  return gEvN - 1;
+}
+
+bool ttEvDel(int i) {
+  if (i < 0 || i >= gEvN) return false;
+  for (int k = i; k < gEvN - 1; k++) gEv[k] = gEv[k + 1];
+  gEvN--;
+  ttSave();
+  return true;
+}
+
+void ttEvClear() { gEvN = 0; ttSave(); }
 
 int  ttCount() { return gTtN; }
 const TtCourse *ttGet(int i) { return (i >= 0 && i < gTtN) ? &gTt[i] : nullptr; }
@@ -141,6 +211,9 @@ int ttLoadJson(const char *json, size_t len) {
     gTt[k++] = c;
   }
   gTtN = k;
+
+  evParse(doc);
+  evSort();
 
   for (int i = 1; i < gTtN; i++) {
     TtCourse v = gTt[i];

@@ -806,7 +806,7 @@ static void durText(char *buf, size_t n, int min) {
 static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
-  char line[96], d1[16], d2[16];
+  char line[160], d1[16], d2[16];
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
   int  endMin = 0;
@@ -830,7 +830,7 @@ static void drawHomeSchedule() {
   const char *nxN  = (nx  >= 0 && ttGet(nx))  ? ttGet(nx)->name  : "无";
   const char *nnN  = (nn  >= 0 && ttGet(nn))  ? ttGet(nn)->name  : "无";
 
-  if (n == 0) { snprintf(line, sizeof(line), "今天没课"); drawMarquee(ROW3, line); return; }
+  if (n == 0) snprintf(line, sizeof(line), "今天没课");
 
   if (cur >= 0) {
     const TtCourse *c = ttGet(cur);
@@ -857,6 +857,23 @@ static void drawHomeSchedule() {
   } else {
     snprintf(line, sizeof(line), "今天没课");
   }
+  /* 事件：普通事件只在发生前提示，全局事件永远追加在最后（如"放学"） */
+  {
+    char tail[64];
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 0; i < ttEvCount(); i++) {
+        const TtEvent *e = ttEvGet(i);
+        if (!e || e->day != today) continue;
+        bool isGlobal = (e->global != 0);
+        if (isGlobal != (pass == 1)) continue;
+        if (!isGlobal && (int)e->at <= nowMin) continue;   /* 已经过了就不再提示 */
+        snprintf(tail, sizeof(tail), "，%s %02u:%02u", e->name,
+                 (unsigned)(e->at / 60), (unsigned)(e->at % 60));
+        strncat(line, tail, sizeof(line) - strlen(line) - 1);
+      }
+    }
+  }
+
   drawMarquee(ROW3, line);
 }
 
