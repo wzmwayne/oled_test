@@ -88,7 +88,7 @@ jobs:
             0x8000   .build/oled_test.ino.partitions.bin \
             0xe000   .build/boot_app0.bin \
             0x10000  .build/oled_test.ino.bin \
-            0x210000 font.bin
+            0x110000 font.bin
           ls -lh oled-full.bin .build/oled_test.ino.bin
 
       - name: Upload artifact

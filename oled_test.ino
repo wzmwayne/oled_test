@@ -300,7 +300,14 @@ static bool fontMount() {
   /* 简单完整性检查：首字形必须是空格 0x20，末字形必须有序 */
   uint16_t first = gWqy14[0].rune;
   uint16_t last  = gWqy14[WQY14_COUNT - 1].rune;
-  bool ok = (first == 0x0020) && (last > first);
+  /* 分区被擦除（全 0xFF）时 first 会是 0xFFFF；此时若继续用这块内存，
+   * 每笔画出来都是 16px 实心白块。校验不过就干脆放弃字库，宁可空白。 */
+  bool ok = (first == 0x0020) && (last > first) && (last <= 0xFF65 + 0x100);
+  if (!ok) {
+    gWqy14 = nullptr;
+    logf("[字库] 分区内容与固件不匹配（首字形 0x%04X，末字形 0x%04X）\r\n", first, last);
+    logf("[字库] 很可能是整包把 font.bin 写到了旧偏移，请重刷 full 镜像\r\n");
+  }
   logf("[字库] mmap %u KB @0x%06X, %d 字形 0x%04X..0x%04X %s\r\n",
        (unsigned)(p->size / 1024), (unsigned)p->address,
        WQY14_COUNT, first, last, ok ? "OK" : "内容异常");
