@@ -871,7 +871,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         }
         val packed = bytes
         val baseName = queryDisplayName(uri).substringBeforeLast('.').ifBlank { "book" }
-        val name = sanitizeBookName(baseName + ".ezzbk")
+        val name = sanitizeBookName(baseName)   /* 扩展名在里面补，避免被截断 */
 
         /* 先问设备还剩多少空间，避免传到一半 littlefs 写失败 */
         BleManager.send(pin, "fsstat") { res, _ ->
@@ -933,17 +933,20 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         return name
     }
 
-    /** 设备端限制：文件名 ≤32 字节，且不能含 / \ : */
+    /** 设备要求：<=32 字节（UTF-8）、只认 .ezzbk、不能有 / \ : 这几种字符。
+     *  基名先截到 26 字节（32 - ".ezzbk" 的 6 字节）再补扩展名，
+     *  否则长名字会把扩展名截掉，设备直接判「文件名不合法」。 */
     private fun sanitizeBookName(raw: String): String {
         var s = raw.replace('/', '_').replace('\\', '_').replace(':', '_').trim()
-        if (s.isEmpty()) s = "book.txt"
+        if (s.isEmpty()) s = "book"
         val b = s.toByteArray(Charsets.UTF_8)
-        if (b.size > 32) {
-            var end = 32
+        if (b.size > 26) {
+            var end = 26
             while (end > 0 && (b[end].toInt() and 0xC0) == 0x80) end--
-            s = String(b, 0, end, Charsets.UTF_8)
+            s = String(b, 0, end, Charsets.UTF_8).trim()
+            if (s.isEmpty()) s = "book"
         }
-        return s
+        return s + ".ezzbk"
     }
 
     private fun confirmClearCourses() {
