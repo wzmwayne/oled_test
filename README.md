@@ -196,7 +196,7 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 |---|---|---|---|
 | nvs | 0x009000 | 20 KB | 配置、进度、课程缓存 |
 | otadata | 0x00E000 | 8 KB | |
-| app0 | 0x010000 | **1 MB** | 固件（build-68：746 KB，72%；RAM 21%） |
+| app0 | 0x010000 | **1 MB** | 固件（约 748 KB，73%；RAM 21%） |
 | font | 0x110000 | 704 KB | 字库点阵（mmap） |
 | spiffs | 0x1C0000 | 2.18 MB | LittleFS：`/books`、`/tt.json` |
 | phy | 0x3EF000 | 4 KB | RF 校准 |
