@@ -49,7 +49,7 @@
 | `bput` | `name` `off` `data`(base64，原文 ≤256B) | `next` `size` |
 | `gettt` | — | `count` `today`(1..7) `week_parity` |
 | `settt` | `data`(分片) / `end` / `reset` | `len` 或 `count` |
-| `listtt` | `from`(≥0) `count`(1..4) | `total` `from` `courses:[{name,day,start,end,parity,global,event}] |
+| `listtt` | `from`(≥0) `count`(1..4) | `total` `from` `courses:[{name,day,start,end,parity,global,event}]`（每条都带 `global`/`event`） |
 | `addcourse` | `name`(≤24 字节 UTF-8) `day`(1..7) `start` `end`(0..1439) `parity`(0/1/2) `global`(0/1) | `index` `count` |
 | `delcourse` | `index` | `count` |
 | `fliptt` | — | `changed` `count` |
