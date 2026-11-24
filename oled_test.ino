@@ -751,6 +751,7 @@ static void wakeUp(WakeSource src) {
   if (gScreenOff) {
     screenWake();
     gLastActivity = millis();
+    mqHold();                       /* 亮屏后先让滚动条停 1.5 秒 */
     logf("[唤醒] 来源 %s\r\n", WAKE_NAME[src]);
   }
   if (src == WAKE_TIMER_DONE) toast("时间到", 4000);
@@ -761,8 +762,19 @@ static void wakeUp(WakeSource src) {
  * 超过 128px 就横向滚动：首尾各停 800ms，中间每 45ms 走 2px；
  * 放得下就居中静态显示，不折腾。 */
 static char     gMqText[64] = "";
+static uint32_t gMqHoldAt = 0;
 static int16_t  gMqOff = 0;
 static uint32_t gMqNext = 0;
+
+#define MQ_HOLD_MS 1500
+
+/* 回到主页 / 亮屏 / 滚完一轮时，先静止 1.5 秒再滚 */
+static void mqHold() {
+  gMqHoldAt  = millis() + MQ_HOLD_MS;
+  gMqNext    = gMqHoldAt;
+  gMqOff     = 0;
+  gMqText[0] = 0;
+}
 
 static void drawMarquee(int y, const char *s) {
   int w = textWidthScaled(s, 1);
@@ -774,14 +786,14 @@ static void drawMarquee(int y, const char *s) {
   if (strcmp(gMqText, s) != 0) {          /* 文案变了就从头滚 */
     snprintf(gMqText, sizeof(gMqText), "%s", s);
     gMqOff = 0;
-    gMqNext = millis() + 800;
+    gMqNext = millis() + MQ_HOLD_MS;
     drawText(0, y, s);
     return;
   }
   uint32_t now = millis();
   if ((int32_t)(now - gMqNext) >= 0) {
     gMqOff += 2;
-    if (gMqOff > w + 20) { gMqOff = 0; gMqNext = now + 800; }
+    if (gMqOff > w + 20) { gMqOff = 0; gMqNext = now + MQ_HOLD_MS; }
     else                 { gMqNext = now + 45; }
   }
   drawText(-gMqOff, y, s);
@@ -809,68 +821,62 @@ static void drawHomeSchedule() {
   char line[160], d1[16], d2[16];
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
-  int  endMin = 0;
-  bool hasEnd = ttDayEnd(today, &endMin);
 
-  /* 当天课程按时间排好，一次算出正在上 / 下节 / 下下节 */
   int idx[TT_MAX];
   int n = ttDayList(today, idx, TT_MAX);
+  if (n == 0) { drawMarquee(ROW3, "今天没课"); return; }
+
+  /* 一次遍历：正在上 / 下节 / 下下节。
+   * 事件（start==end）不会"正在上"，只会作为下节/下下节出现。 */
   int cur = -1, nx = -1, nn = -1;
   for (int i = 0; i < n; i++) {
     const TtCourse *c = ttGet(idx[i]);
-    if (!c) continue;
-    if (nowMin >= (int)c->start && nowMin < (int)c->end) {
+    if (!c || c->global) continue;               /* 全局事件不参与时间线 */
+    if (c->start != c->end && nowMin >= (int)c->start && nowMin < (int)c->end) {
       cur = idx[i];
     } else if ((int)c->start > nowMin) {
       if (nx < 0)      nx = idx[i];
       else if (nn < 0) { nn = idx[i]; break; }
     }
   }
-  const char *curN = (cur >= 0 && ttGet(cur)) ? ttGet(cur)->name : "";
-  const char *nxN  = (nx  >= 0 && ttGet(nx))  ? ttGet(nx)->name  : "无";
-  const char *nnN  = (nn  >= 0 && ttGet(nn))  ? ttGet(nn)->name  : "无";
-
-  if (n == 0) snprintf(line, sizeof(line), "今天没课");
+  const char *nxN = (nx >= 0 && ttGet(nx)) ? ttGet(nx)->name : "无";
+  const char *nnN = (nn >= 0 && ttGet(nn)) ? ttGet(nn)->name : "无";
 
   if (cur >= 0) {
     const TtCourse *c = ttGet(cur);
-    durText(d1, sizeof(d1), (int)c->end - nowMin);          /* 还剩 */
-    if (hasEnd) {
-      durText(d2, sizeof(d2), endMin - nowMin);             /* 还有多久放学 */
-      snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s，%s 后放学",
-               curN, d1, nxN, d2);
-    } else {
-      snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s", curN, d1, nxN);
-    }
+    durText(d1, sizeof(d1), (int)c->end - nowMin);
+    snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s",
+             c->name, d1, nxN);
   } else if (nx >= 0) {
     const TtCourse *c = ttGet(nx);
-    durText(d1, sizeof(d1), (int)c->start - nowMin);        /* 距离下节上课 */
-    if (hasEnd) {
-      durText(d2, sizeof(d2), endMin - nowMin);
-      snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s，%s 后放学",
-               nxN, d1, nnN, d2);
-    } else {
-      snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s", nxN, d1, nnN);
-    }
-  } else if (hasEnd) {
-    snprintf(line, sizeof(line), "放学：今天的课都上完了");   /* 已全部结束 */
+    durText(d1, sizeof(d1), (int)c->start - nowMin);
+    snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s",
+             nxN, d1, nnN);
   } else {
-    snprintf(line, sizeof(line), "今天没课");
+    snprintf(line, sizeof(line), "今天的课都上完了");
   }
-  /* 事件：普通事件只在发生前提示，全局事件永远追加在最后（如"放学"） */
+
+  /* 全局事件：按离现在由近到远追加，已经过去的不要。
+   * 显示成「<相对>后 名称 <绝对时间>」，如「1小时20分后 放学 17:30」 */
   {
+    bool used[TT_MAX] = {false};
     char tail[64];
-    for (int pass = 0; pass < 2; pass++) {
-      for (int i = 0; i < ttEvCount(); i++) {
-        const TtEvent *e = ttEvGet(i);
-        if (!e || e->day != today) continue;
-        bool isGlobal = (e->global != 0);
-        if (isGlobal != (pass == 1)) continue;
-        if (!isGlobal && (int)e->at <= nowMin) continue;   /* 已经过了就不再提示 */
-        snprintf(tail, sizeof(tail), "，%s %02u:%02u", e->name,
-                 (unsigned)(e->at / 60), (unsigned)(e->at % 60));
-        strncat(line, tail, sizeof(line) - strlen(line) - 1);
+    for (int k = 0; k < TT_MAX; k++) {
+      int best = -1;
+      for (int i = 0; i < n; i++) {
+        if (used[i]) continue;
+        const TtCourse *c = ttGet(idx[i]);
+        if (!c || !c->global) continue;
+        if ((int)c->start <= nowMin) { used[i] = true; continue; }   /* 已过 */
+        if (best < 0 || c->start < ttGet(idx[best])->start) best = i;
       }
+      if (best < 0) break;
+      used[best] = true;
+      const TtCourse *c = ttGet(idx[best]);
+      durText(d2, sizeof(d2), (int)c->start - nowMin);
+      snprintf(tail, sizeof(tail), "，%s后 %s %02u:%02u", d2, c->name,
+               (unsigned)(c->start / 60), (unsigned)(c->start % 60));
+      strncat(line, tail, sizeof(line) - strlen(line) - 1);
     }
   }
 
@@ -975,8 +981,12 @@ static void drawSchedule() {
     if (k >= n) break;
     const TtCourse *c = ttGet(idx[k]);
     hhmm(t1, sizeof(t1), c->start);
-    hhmm(t2, sizeof(t2), c->end);
-    snprintf(buf, sizeof(buf), "%s-%s %s", t1, t2, c->name);
+    if (c->start == c->end) {
+      snprintf(buf, sizeof(buf), "· %s %s", t1, c->name);   /* 事件：单点 */
+    } else {
+      hhmm(t2, sizeof(t2), c->end);
+      snprintf(buf, sizeof(buf), "%s-%s %s", t1, t2, c->name);
+    }
     int y = ROW1 + i * 16;
     if (k == gSchSel) {
       fillRect(0, y, SCREEN_W - 1, y + 14);
@@ -1214,6 +1224,7 @@ static void goHome() {
   gApp = APP_HOME;
   gScr = SCR_APP;
   gLastActivity = millis();
+  mqHold();
 }
 static void enterApp(int id) {
   if (id < 0 || id >= APP_COUNT) return;

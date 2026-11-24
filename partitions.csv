@@ -1,11 +1,12 @@
-# 自定义分区表：字库独立分区，运行时 mmap 读取
-# 字库 128KB -> 256KB：加入 GB2312 二级汉字与全部标点后需要 224.7KB
-# 空间从 spiffs 借 128KB（1.75M -> 1.62M），其余不动。
+# 4MB flash 重新分配：应用区只用得到 0.8MB，多出来的全给字库和书库
+#   app0   2MB  -> 1MB    （当前固件 752KB，留 272KB 余量）
+#   font   256KB -> 704KB （全 CJK 21419 字形，669KB）
+#   spiffs 1.62MB -> 2.18MB
 # name,     type, subtype,  offset,     size
 nvs,        data, nvs,      0x9000,     0x5000
 otadata,    data, ota,      0xe000,     0x2000
-app0,       app,  ota_0,    0x10000,    0x200000
-font,       data, 0x40,     0x210000,   0x40000
-spiffs,     data, spiffs,   0x250000,   0x19F000
+app0,       app,  ota_0,    0x10000,    0x100000
+font,       data, 0x40,     0x110000,   0xB0000
+spiffs,     data, spiffs,   0x1C0000,   0x22F000
 phy,        data, phy,      0x3EF000,   0x1000
 coredump,   data, coredump, 0x3F0000,   0x10000

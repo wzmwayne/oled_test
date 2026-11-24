@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define WQY14_HEIGHT 14
-#define WQY14_COUNT  7190
+#define WQY14_COUNT  21419
 #define WQY14_GLYPH_BYTES 32
 
 typedef struct {

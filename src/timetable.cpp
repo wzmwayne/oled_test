@@ -11,8 +11,6 @@
 
 static TtCourse gTt[TT_MAX];
 static int      gTtN = 0;
-static TtEvent  gEv[TT_EV_MAX];
-static int      gEvN = 0;
 
 /* ==================== 日期工具（Howard Hinnant 算法） ==================== */
 static int32_t daysFromCivil(int y, unsigned m, unsigned d) {
@@ -60,49 +58,13 @@ static bool ttSave() {
     o["s"] = gTt[i].start;
     o["e"] = gTt[i].end;
     o["p"] = gTt[i].parity;
+    if (gTt[i].global) o["g"] = 1;
   }
-  JsonArray ea = doc["e"].to<JsonArray>();
-  for (int i = 0; i < gEvN; i++) {
-    JsonObject o = ea.add<JsonObject>();
-    o["n"] = gEv[i].name;
-    o["d"] = gEv[i].day;
-    o["t"] = gEv[i].at;
-    o["g"] = gEv[i].global;
-  }
-
   File f = LittleFS.open("/tt.json", "w");
   if (!f) return false;
   size_t n = serializeJson(doc, f);
   f.close();
   return n > 0;
-}
-
-/* ==================== 事件 ==================== */
-static void evSort() {
-  for (int i = 1; i < gEvN; i++) {
-    TtEvent v = gEv[i];
-    int j = i - 1;
-    while (j >= 0 && (gEv[j].day > v.day || (gEv[j].day == v.day && gEv[j].at > v.at))) {
-      gEv[j + 1] = gEv[j];
-      j--;
-    }
-    gEv[j + 1] = v;
-  }
-}
-
-static void evParse(JsonDocument &doc) {
-  gEvN = 0;
-  for (JsonObject o : doc["e"].as<JsonArray>()) {
-    if (gEvN >= TT_EV_MAX) break;
-    TtEvent e;
-    memset(&e, 0, sizeof(e));
-    snprintf(e.name, sizeof(e.name), "%s", (const char *)(o["n"] | ""));
-    e.day    = (uint8_t)(o["d"] | 0);
-    e.at     = (uint16_t)(o["t"] | 0);
-    e.global = (uint8_t)((o["g"] | 0) ? 1 : 0);
-    if (!e.name[0] || e.day < 1 || e.day > 7 || e.at > 1439) continue;
-    gEv[gEvN++] = e;
-  }
 }
 
 void ttBegin() {
@@ -124,52 +86,27 @@ void ttBegin() {
     c.start   = (uint16_t)(o["s"] | 0);
     c.end     = (uint16_t)(o["e"] | 0);
     c.parity  = (uint8_t)(o["p"] | 0);
+    c.global  = (uint8_t)((o["g"] | 0) ? 1 : 0);
     if (!c.name[0] || c.day < 1 || c.day > 7) continue;
-    if (c.start >= c.end || c.end > 1439 || c.parity > 2) continue;
+    if (c.start > c.end || c.end > 1439 || c.parity > 2) continue;   /* s==e 是事件 */
     gTt[gTtN++] = c;
   }
 
-  evParse(doc);
-  evSort();
 }
-
-int  ttEvCount() { return gEvN; }
-const TtEvent *ttEvGet(int i) { return (i >= 0 && i < gEvN) ? &gEv[i] : nullptr; }
-
-int ttEvAdd(const char *name, int day, int at, int global) {
-  if (!name || !*name || gEvN >= TT_EV_MAX) return -1;
-  if (day < 1 || day > 7 || at < 0 || at > 1439) return -1;
-  TtEvent e;
-  memset(&e, 0, sizeof(e));
-  snprintf(e.name, sizeof(e.name), "%s", name);
-  e.day    = (uint8_t)day;
-  e.at     = (uint16_t)at;
-  e.global = global ? 1 : 0;
-  gEv[gEvN++] = e;
-  evSort();
-  ttSave();
-  return gEvN - 1;
-}
-
-bool ttEvDel(int i) {
-  if (i < 0 || i >= gEvN) return false;
-  for (int k = i; k < gEvN - 1; k++) gEv[k] = gEv[k + 1];
-  gEvN--;
-  ttSave();
-  return true;
-}
-
-void ttEvClear() { gEvN = 0; ttSave(); }
 
 int  ttCount() { return gTtN; }
 const TtCourse *ttGet(int i) { return (i >= 0 && i < gTtN) ? &gTt[i] : nullptr; }
 
 /* ==================== 增删改 ==================== */
 int ttAdd(const char *name, int day, int start, int end, int parity) {
+  return ttAddEx(name, day, start, end, parity, 0);
+}
+
+int ttAddEx(const char *name, int day, int start, int end, int parity, int global) {
   if (!name || !*name) return -1;
   if (gTtN >= TT_MAX) return -1;
   if (day < 1 || day > 7) return -1;
-  if (start < 0 || end <= start || end > 1439) return -1;
+  if (start < 0 || end < start || end > 1439) return -1;   /* end==start 是事件 */
   if (parity < 0 || parity > 2) return -1;
 
   /* 插入到按 (星期, 开始时间) 有序的位置，列表天然好看 */
@@ -184,6 +121,7 @@ int ttAdd(const char *name, int day, int start, int end, int parity) {
   snprintf(c.name, sizeof(c.name), "%s", name);
   c.day = (uint8_t)day; c.start = (uint16_t)start; c.end = (uint16_t)end;
   c.parity = (uint8_t)parity;
+  c.global = global ? 1 : 0;
   gTtN++;
   ttSave();
   return pos;
@@ -206,14 +144,12 @@ int ttLoadJson(const char *json, size_t len) {
     c.start  = (uint16_t)(o["s"] | 0);
     c.end    = (uint16_t)(o["e"] | 0);
     c.parity = (uint8_t)(o["p"] | 0);
+    c.global = (uint8_t)((o["g"] | 0) ? 1 : 0);
     if (!c.name[0] || c.day < 1 || c.day > 7) continue;
-    if (c.start >= c.end || c.end > 1439 || c.parity > 2) continue;
+    if (c.start > c.end || c.end > 1439 || c.parity > 2) continue;   /* s==e 是事件 */
     gTt[k++] = c;
   }
   gTtN = k;
-
-  evParse(doc);
-  evSort();
 
   for (int i = 1; i < gTtN; i++) {
     TtCourse v = gTt[i];

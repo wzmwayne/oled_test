@@ -19,26 +19,10 @@ typedef struct {
   char     name[TT_NAME_MAX];
   uint8_t  day;      /* 1=周一 .. 7=周日 */
   uint16_t start;    /* 距 00:00 的分钟数 */
-  uint16_t end;
+  uint16_t end;      /* start == end 表示"事件"（单点） */
   uint8_t  parity;   /* 0=每周 1=单周 2=双周 */
+  uint8_t  global;   /* 事件才有意义：1=全局（追加在主页行尾） 0=普通 */
 } TtCourse;
-
-/* ---- 事件：单个时间点（不是时间段）----
- * global=1 全局事件：始终追加在主页课表滚动条末尾（如"放学"）
- * global=0 普通事件：只在发生前追加（过了就不再提示，如"升旗"） */
-#define TT_EV_MAX    24
-typedef struct {
-  char     name[TT_NAME_MAX];
-  uint8_t  day;      /* 1=周一 .. 7=周日 */
-  uint16_t at;       /* 距 00:00 的分钟数 */
-  uint8_t  global;   /* 1=全局 0=普通 */
-} TtEvent;
-
-int  ttEvCount();
-const TtEvent *ttEvGet(int i);
-int  ttEvAdd(const char *name, int day, int at, int global);   /* 返回下标，-1 失败 */
-bool ttEvDel(int i);
-void ttEvClear();
 
 void  ttBegin();                                  /* LittleFS 挂载后调用，读 /tt.json */
 int   ttCount();
@@ -49,6 +33,8 @@ const TtCourse *ttGet(int i);
 int   ttLoadJson(const char *json, size_t len);
 
 int   ttAdd(const char *name, int day, int start, int end, int parity);
+/* end==start 表示事件（单点）；global=1 时该事件追加在主页行尾 */
+int   ttAddEx(const char *name, int day, int start, int end, int parity, int global);
 bool  ttDel(int i);
 void  ttClear();
 
