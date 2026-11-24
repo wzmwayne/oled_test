@@ -670,7 +670,9 @@ enum AppId {
   APP_COUNT
 };
 #define MENU_COUNT 5          /* 菜单只列前 5 项 */
-#define ID_MAX_BITS 8         /* 编号最多 8 位二进制 */
+#define ID_MAX_BITS 16        /* 普通编号最多 8 位；隐藏编号 = 8 位前缀 + 编号 */
+#define HID_PREFIX     "10010011"
+#define HID_PREFIX_LEN 8      /* 8 位 @2x 正好占满 128px 屏宽 */
 enum Screen { SCR_APP, SCR_MENU, SCR_ID };
 
 static const char *APP_NAME[APP_COUNT] = {
@@ -684,6 +686,9 @@ static enum Screen gScr = SCR_APP;
 static int      gMenuSel = 0;
 static char     gIdBuf[ID_MAX_BITS + 1] = {0};
 static uint8_t  gIdLen = 0;
+static bool     gIdHidden = false;   /* 已输入隐藏前缀，后续位不显示 */
+static bool     gHiddenApp = false;  /* 当前应用是隐藏方式进来的 */
+static uint32_t gHiddenAt = 0;
 
 static char     gToast[40] = {0};
 static uint32_t gToastUntil = 0;
@@ -1037,10 +1042,21 @@ static void drawMenu() {
 }
 
 static void drawIdInput() {
-  char l2[ID_MAX_BITS + 2];
+  char l2[20];
+  uint8_t sc = 2;
+
   if (gIdLen == 0) { l2[0] = '_'; l2[1] = 0; }
-  else { memcpy(l2, gIdBuf, gIdLen); l2[gIdLen] = 0; }
-  drawCenterScaled(8, l2, 2);             /* 2 倍，上移到 y=8：占 8~35，给底部提示留空 */
+  else if (gIdHidden) {
+    /* 隐藏模式：只画那 8 位前缀（@2x 正好占满一行），后面的位一个字都不显示 */
+    memcpy(l2, gIdBuf, HID_PREFIX_LEN);
+    l2[HID_PREFIX_LEN] = 0;
+  } else {
+    if (gIdLen > 8) sc = 1;               /* 普通输入超长时缩到 1 倍免得溢出 */
+    memcpy(l2, gIdBuf, gIdLen);
+    l2[gIdLen] = 0;
+  }
+
+  drawCenterScaled(8 + (sc == 1 ? 6 : 0), l2, sc);
   drawCenter(ROW3, "#确认 *返回");
 }
 
@@ -1048,6 +1064,14 @@ static void drawIdInput() {
  *   0/00   主页        1/01  精确时钟    10  正计时    11  倒计时
  *   111    课表        100   阅读器      101 蓝牙配置  110 同步
  */
+static int idToApp(const char *bits, int len);   /* 定义在后面，这里先声明 */
+
+/* 隐藏编号：前缀之后再按普通编号解析，但目前只开放阅读器 */
+static int idToHiddenApp(const char *bits, int len) {
+  int id = idToApp(bits, len);
+  return (id == APP_READER) ? id : -1;
+}
+
 static int idToApp(const char *bits, int len) {
   if (len <= 0) return -1;
   int v = 0;
@@ -1239,16 +1263,28 @@ static void drawMenuItem(int y, const char *s, bool sel) {
 static void goHome() {
   if (gApp == APP_BTCONF) btEnd();          /* 离开蓝牙页立即关服务 */
   if (gApp == APP_READER) rdSaveProgress(); /* 离开阅读器先记下读到的位置 */
-  if (gApp != APP_HOME) gLastApp = gApp;
+  if (gHiddenApp) {
+    if (gLastApp == gApp) gLastApp = -1;    /* 隐藏应用不算"上次应用" */
+  } else if (gApp != APP_HOME) {
+    gLastApp = gApp;
+  }
+  gHiddenApp = false;
   gApp = APP_HOME;
   gScr = SCR_APP;
   gLastActivity = millis();
   mqHold();
 }
-static void enterApp(int id) {
+static void enterApp(int id, bool hidden = false) {
   if (id < 0 || id >= APP_COUNT) return;
   if (gApp == APP_BTCONF && id != APP_BTCONF) btEnd();
-  if (gApp != APP_HOME && gApp != id) gLastApp = gApp;
+
+  /* 隐藏方式进来的应用不进"上次应用"，否则主页长按 * 又能回去 */
+  gHiddenApp = hidden;
+  if (hidden) {
+    if (gLastApp == id) gLastApp = -1;      /* 清掉以前普通访问留下的记录 */
+  } else if (gApp != APP_HOME && gApp != id) {
+    gLastApp = gApp;
+  }
   gApp = id;
   gScr = SCR_APP;
   gLastActivity = millis();
@@ -1299,6 +1335,7 @@ static void handleKeys() {
   if (hashL && gApp == APP_HOME && gScr == SCR_APP) {
     gScr = SCR_ID;
     gIdLen = 0;
+    gIdHidden = false;
     logf("[界面] ID 输入\r\n");
     return;
   }
@@ -1314,9 +1351,25 @@ static void handleKeys() {
 
   /* ---- ID 输入 ---- */
   if (gScr == SCR_ID) {
-    if (zeroS && gIdLen < ID_MAX_BITS) gIdBuf[gIdLen++] = '0';
-    if (oneS  && gIdLen < ID_MAX_BITS) gIdBuf[gIdLen++] = '1';
+    bool added = false;
+    if (zeroS && gIdLen < ID_MAX_BITS) { gIdBuf[gIdLen++] = '0'; added = true; }
+    if (oneS  && gIdLen < ID_MAX_BITS) { gIdBuf[gIdLen++] = '1'; added = true; }
+    if (added && !gIdHidden && gIdLen == HID_PREFIX_LEN &&
+        !memcmp(gIdBuf, HID_PREFIX, HID_PREFIX_LEN)) {
+      /* 前缀刚好输满，转入隐藏模式：后面再输的位一个字都不画 */
+      gIdHidden = true;
+      logf("[界面] 隐藏 ID 模式\r\n");
+    }
+
     if (hashS) {
+      if (gIdHidden) {
+        if (gIdLen <= HID_PREFIX_LEN) { toast("编号不完整", 1500); return; }
+        int id = idToHiddenApp(gIdBuf + HID_PREFIX_LEN, gIdLen - HID_PREFIX_LEN);
+        logf("[界面] 隐藏 ID -> %s\r\n", id >= 0 ? APP_NAME[id] : "无效");
+        if (id >= 0) enterApp(id, true);
+        else { gIdHidden = false; goHome(); toast("无效隐藏编号", 1500); }
+        return;
+      }
       int id = idToApp(gIdBuf, gIdLen);
       logf("[界面] ID=%s (%d 位) -> %s\r\n", gIdLen ? gIdBuf : "(空)", gIdLen,
            id >= 0 ? APP_NAME[id] : "无效");
@@ -1324,7 +1377,7 @@ static void handleKeys() {
       else { goHome(); toast("无效编号", 1500); }
       return;
     }
-    if (starS) goHome();
+    if (starS) { gIdHidden = false; goHome(); }
     return;
   }
 
