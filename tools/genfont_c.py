@@ -64,9 +64,9 @@ def render(font, ch):
     return w, rows
 
 
-def gb2312_level1():
+def gb2312_range(hi_from, hi_to):
     out = set()
-    for hi in range(0xB0, 0xD8):
+    for hi in range(hi_from, hi_to):
         for lo in range(0xA1, 0xFF):
             try:
                 ch = bytes([hi, lo]).decode("gb2312")
@@ -76,17 +76,30 @@ def gb2312_level1():
     return out
 
 
+def gb2312_level1():
+    """一级常用汉字 3755 个（0xB0-0xD7）"""
+    return gb2312_range(0xB0, 0xD8)
+
+
+def gb2312_level2():
+    """二级次常用汉字 3008 个（0xD8-0xF7）——之前整段缺失，是缺字的主因"""
+    return gb2312_range(0xD8, 0xF8)
+
+
 def build_charset(args):
-    cs = set(range(0x20, 0x7F))
-    cs |= set(range(0x3000, 0x3040))
+    cs = set(range(0x20, 0x7F))          # ASCII
+    cs |= set(range(0x00A0, 0x0100))     # 拉丁补充（° × 等）
+    cs |= set(range(0x2000, 0x2070))     # 通用标点：“”‘’…—‰† 等（之前整段缺失）
+    cs |= set(range(0x3000, 0x3040))     # CJK 标点：、。「」『』【】・等
+    cs |= set(range(0xFF01, 0xFF66))     # 全角 ASCII
+
     if args.chars:
         cs |= {ord(c) for c in args.chars}
     elif args.full:
-        cs |= set(range(0x4E00, 0xA000))
-        cs |= gb2312_level1()
+        cs |= set(range(0x4E00, 0xA000))      # CJK 基本区全量
+        cs |= gb2312_level1() | gb2312_level2()
     else:
-        cs |= gb2312_level1()
-        cs |= set(range(0xFF01, 0xFF66))
+        cs |= gb2312_level1() | gb2312_level2()
     return sorted(cs)
 
 

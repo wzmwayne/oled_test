@@ -799,36 +799,63 @@ static void durText(char *buf, size_t n, int min) {
 }
 
 /* 主页第 4 行：正在上的课 → 下节课 → 已放学 → 今日无课 */
+/* 主页第 4 行：固定句式，一眼看完当前状态。
+ *   上课：正在上 X，还剩 A，下节 Y，B 后放学
+ *   下课：下节 X，还有 A，下下节 Y，B 后放学
+ * 名词用课名，时间统一成人话（"45分" / "1小时20分"）。 */
 static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
-  char line[64], t1[8], t2[8], d1[16];
+  char line[96], d1[16], d2[16];
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
   int  endMin = 0;
   bool hasEnd = ttDayEnd(today, &endMin);
 
-  int cur = ttNowIdx(today, nowMin);
-  int nxt = ttNextIdx(today, nowMin);
+  /* 当天课程按时间排好，一次算出正在上 / 下节 / 下下节 */
+  int idx[TT_MAX];
+  int n = ttDayList(today, idx, TT_MAX);
+  int cur = -1, nx = -1, nn = -1;
+  for (int i = 0; i < n; i++) {
+    const TtCourse *c = ttGet(idx[i]);
+    if (!c) continue;
+    if (nowMin >= (int)c->start && nowMin < (int)c->end) {
+      cur = idx[i];
+    } else if ((int)c->start > nowMin) {
+      if (nx < 0)      nx = idx[i];
+      else if (nn < 0) { nn = idx[i]; break; }
+    }
+  }
+  const char *curN = (cur >= 0 && ttGet(cur)) ? ttGet(cur)->name : "";
+  const char *nxN  = (nx  >= 0 && ttGet(nx))  ? ttGet(nx)->name  : "无";
+  const char *nnN  = (nn  >= 0 && ttGet(nn))  ? ttGet(nn)->name  : "无";
+
+  if (n == 0) { snprintf(line, sizeof(line), "今天没课"); drawMarquee(ROW3, line); return; }
 
   if (cur >= 0) {
     const TtCourse *c = ttGet(cur);
+    durText(d1, sizeof(d1), (int)c->end - nowMin);          /* 还剩 */
     if (hasEnd) {
-      durText(d1, sizeof(d1), endMin - nowMin);
-      snprintf(line, sizeof(line), "正在上 %s 剩%d分 · 放学还有%s", c->name, (int)c->end - nowMin, d1);
+      durText(d2, sizeof(d2), endMin - nowMin);             /* 还有多久放学 */
+      snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s，%s 后放学",
+               curN, d1, nxN, d2);
     } else {
-      snprintf(line, sizeof(line), "正在上 %s 剩%d分", c->name, (int)c->end - nowMin);
+      snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s", curN, d1, nxN);
     }
-  } else if (nxt >= 0) {
-    const TtCourse *c = ttGet(nxt);
-    hhmm(t1, sizeof(t1), c->start);
-    durText(d1, sizeof(d1), (int)c->start - nowMin);
-    snprintf(line, sizeof(line), "下节 %s %s · 还有%s", c->name, t1, d1);
+  } else if (nx >= 0) {
+    const TtCourse *c = ttGet(nx);
+    durText(d1, sizeof(d1), (int)c->start - nowMin);        /* 距离下节上课 */
+    if (hasEnd) {
+      durText(d2, sizeof(d2), endMin - nowMin);
+      snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s，%s 后放学",
+               nxN, d1, nnN, d2);
+    } else {
+      snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s", nxN, d1, nnN);
+    }
   } else if (hasEnd) {
-    hhmm(t2, sizeof(t2), (uint16_t)endMin);
-    snprintf(line, sizeof(line), "今日课已结束 · %s放学", t2);
+    snprintf(line, sizeof(line), "放学：今天的课都上完了");   /* 已全部结束 */
   } else {
-    snprintf(line, sizeof(line), "今日无课");
+    snprintf(line, sizeof(line), "今天没课");
   }
   drawMarquee(ROW3, line);
 }
