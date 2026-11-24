@@ -771,33 +771,42 @@ static void wakeUp(WakeSource src) {
 }
 
 /* ---------------- 走马灯 ----------------
- * 课表那行文案经常超过 128px（"下节 高等数学 还有45分 · 16:40放学"），
- * 超过 128px 就横向滚动：首尾各停 800ms，中间每 45ms 走 2px；
- * 放得下就居中静态显示，不折腾。 */
-static char     gMqText[64] = "";
-static uint32_t gMqHoldAt = 0;
-static int16_t  gMqOff = 0;
+ * 主页课表那行经常超过 128px（"上课：正在上 高等数学，还剩 23分，下节 大学英语，
+ * 1小时20分后 午餐 12:10"），超过就横向滚动：每轮开头静止 1.5 秒，
+ * 之后每 45ms 走 2px，滚到底再停 1.5 秒重来；放得下就居中静态显示。 */
+/* 文案指纹（FNV-1a）：只存指纹不存副本。
+ * 主页那行 UTF-8 一个字 3 字节，一屏课表状态轻松 100+ 字节；
+ * 以前用 64 字节缓冲存副本，长句被截断后 strcmp 永远不相等，
+ * 每帧都被当成"文案变了"重置偏移——这就是主页课表栏不滚的原因。 */
+static uint32_t gMqKey  = 0;
+static int16_t  gMqOff  = 0;
 static uint32_t gMqNext = 0;
 
 #define MQ_HOLD_MS 1500
 
+static uint32_t mqKey(const char *s) {
+  uint32_t h = 2166136261u;
+  for (const uint8_t *p = (const uint8_t *)s; *p; p++) { h ^= *p; h *= 16777619u; }
+  return h ? h : 1u;                       /* 0 留给"强制重排" */
+}
+
 /* 回到主页 / 亮屏 / 滚完一轮时，先静止 1.5 秒再滚 */
 static void mqHold() {
-  gMqHoldAt  = millis() + MQ_HOLD_MS;
-  gMqNext    = gMqHoldAt;
-  gMqOff     = 0;
-  gMqText[0] = 0;
+  gMqNext = millis() + MQ_HOLD_MS;
+  gMqOff  = 0;
+  gMqKey  = 0;
 }
 
 static void drawMarquee(int y, const char *s) {
   int w = textWidthScaled(s, 1);
+  uint32_t k = mqKey(s);
   if (w <= SCREEN_W) {
-    gMqText[0] = 0; gMqOff = 0;
+    gMqKey = k; gMqOff = 0;
     drawCenter(y, s);
     return;
   }
-  if (strcmp(gMqText, s) != 0) {          /* 文案变了就从头滚 */
-    snprintf(gMqText, sizeof(gMqText), "%s", s);
+  if (k != gMqKey) {                      /* 文案变了就从头滚 */
+    gMqKey = k;
     gMqOff = 0;
     gMqNext = millis() + MQ_HOLD_MS;
     drawText(0, y, s);
