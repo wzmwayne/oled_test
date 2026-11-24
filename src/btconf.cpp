@@ -110,7 +110,7 @@ void btCfgSetTz(int tz) {
  *   {"action":"settt","params":{"end":true}}             解析并整表替换
  *   {"action":"settt","params":{"reset":true}}           丢弃缓冲
  */
-#define TT_JSON_MAX 4096
+#define TT_JSON_MAX 6144
 static char    *gTtBuf = nullptr;
 static uint32_t gTtBufLen = 0;
 
@@ -486,7 +486,7 @@ static void handleJson(const char *in, size_t len) {
         } else if (gTtBufLen + clen >= TT_JSON_MAX) {
           ttBufFree();
           resp["ok"] = false;
-          resp["msg"] = "课表超过 4KB，请精简课程名或减少条数";
+          resp["msg"] = "课表超过 6KB，请精简课程名或减少条数";
         } else {
           memcpy(gTtBuf + gTtBufLen, chunk, clen);
           gTtBufLen += clen;
