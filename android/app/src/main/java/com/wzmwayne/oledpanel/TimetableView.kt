@@ -167,7 +167,9 @@ class TimetableView @JvmOverloads constructor(
             pText.color = 0xFF10141A.toInt()
             val textX = r.left + dp(3f)
             var textY = r.top + dp(13f)
-            canvas.drawText(ellipsize(c.name, r.width() - dp(6f)), textX, textY, pText)
+            /* 事件（单点）只有一条 14dp 的色块，前面加个点，和课程区分开 */
+            val label = if (c.isEvent) "· " + c.name else c.name
+            canvas.drawText(ellipsize(label, r.width() - dp(6f)), textX, textY, pText)
 
             if (r.height() > dp(30f)) {
                 textY += dp(12f)

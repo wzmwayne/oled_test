@@ -31,7 +31,7 @@ object TimetableMeta {
         return root.toString(2)
     }
 
-    /** 紧凑版，上传用：省掉缩进，40 门课约 1.8KB，塞得进固件 4KB 缓冲 */
+    /** 紧凑版，上传用：省掉缩进，70 条约 3KB，塞得进固件 6KB 暂存区 */
     fun exportCompact(list: List<Course>): String {
         val arr = JSONArray()
         list.sortedWith(compareBy({ it.day }, { it.start })).forEach { c ->
