@@ -145,7 +145,7 @@ object CourseSync {
             .put("global", c.global)
         BleManager.send(pin, "addcourse", params) { res, _ ->
             if (res?.ok != true) {
-                done(false, "第 " + (i + 1) + " 门失败：" + (res?.msg ?: "无响应"))
+                done(false, "第 " + (i + 1) + " 项失败：" + (res?.msg ?: "无响应"))
                 return@send
             }
             onProgress(i + 1, list.size)

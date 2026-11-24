@@ -6,7 +6,8 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 
-data class Book(val name: String, val size: Long)
+/** title 是 .ezzbk 元数据里的书名，空表示容器没带，退回文件名显示 */
+data class Book(val name: String, val size: Long, val title: String = "")
 
 class BookAdapter(
     private val onDelete: (Book) -> Unit
@@ -38,8 +39,11 @@ class BookAdapter(
         private val btnDel: TextView = itemView.findViewById(R.id.btnBookDelete)
 
         fun bind(book: Book) {
-            tvName.text = book.name
-            tvSize.text = formatSize(book.size)
+            val label = book.title.ifBlank { book.name }
+            tvName.text = label
+            /* 显示的是书名时，把真实文件名带上——删除/排查都按文件名走 */
+            tvSize.text = if (label == book.name) formatSize(book.size)
+                          else book.name + " · " + formatSize(book.size)
             btnDel.setOnClickListener { onDelete(book) }
         }
 

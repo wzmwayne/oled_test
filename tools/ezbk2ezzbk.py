@@ -7,12 +7,13 @@
   2. 正文去掉行首反斜杠，保留 # / ## 标题行给目录用
   3. 每 16384 字节一块做 raw deflate 压缩，输出可直接给固件随机读取
 
-.ezzbk 布局（小端，v2）:
+.ezzbk 布局（小端，v0.1）:
   "EZZB" | u8 algo | u8 flags | u16 reserved
-  | u32 rawSize | u32 blockSize | u32 blockCount
-  | u32 off[blockCount+1] | block0 ... blockN
+  | u32 rawSize | u32 blockSize | u32 blockCount | u32 metaLen
+  | meta[metaLen]（每行 key=value，UTF-8） | u32 off[blockCount+1] | block0 ... blockN
 
   algo 0 = LZ4，1 = raw deflate（16KB 窗口）。默认输出 deflate。
+  元数据只收 title / writer / intro / source / date，设备用其中的 title 当书名。
 
 用法:
   python3 tools/ezbk2ezzbk.py book.ezbk -o book.ezzbk
@@ -26,7 +27,7 @@ MAGIC = b'EZZB'
 BLOCK = 16384
 ALGO_LZ4 = 0
 ALGO_DEFLATE = 1
-HDR = 20
+HDR = 24   # "EZZB" | algo | flags | u16 reserved | rawSize | blockSize | blockCount | metaLen
 
 
 def parse_ezbk(data: bytes):
@@ -170,17 +171,35 @@ def decode_block(src: bytes, out_size: int, algo: int) -> bytes:
     return lz4_decompress(src, out_size)
 
 
-def build_ezb(raw: bytes, algo: int = ALGO_DEFLATE) -> bytes:
+META_KEYS = ('title', 'writer', 'intro', 'source', 'date')
+
+
+def escape_meta_value(v: str) -> str:
+    """值内换行/回车/反斜杠转义，保证一条记录占一行。"""
+    return v.replace('\\', '\\\\').replace('\n', '\\n').replace('\r', '\\r')
+
+
+def build_meta(meta: dict) -> bytes:
+    lines = []
+    for k in META_KEYS:
+        v = (meta.get(k) or '').strip()
+        if v:
+            lines.append('%s=%s' % (k, escape_meta_value(v)))
+    return ('\n'.join(lines) + ('\n' if lines else '')).encode('utf-8')
+
+
+def build_ezb(raw: bytes, algo: int = ALGO_DEFLATE, meta: bytes = b'') -> bytes:
     blocks = [encode_block(raw[i:i + BLOCK], algo) for i in range(0, len(raw), BLOCK)]
     if not blocks:
         blocks = [encode_block(b'', algo)]
     n = len(blocks)
-    header_len = HDR + 4 * (n + 1)
+    header_len = HDR + len(meta) + 4 * (n + 1)
     offs = [header_len]
     for b in blocks:
         offs.append(offs[-1] + len(b))
     head = MAGIC + bytes([algo & 0xFF, 0, 0, 0])
-    head += struct.pack('<III', len(raw), BLOCK, n)
+    head += struct.pack('<IIII', len(raw), BLOCK, n, len(meta))
+    head += meta
     head += b''.join(struct.pack('<I', o) for o in offs)
     return head + b''.join(blocks)
 
@@ -196,19 +215,20 @@ def main(argv):
     data = open(src, 'rb').read()
     if data.startswith(b'EZBK/1') or data.startswith(b'\xef\xbb\xbfEZBK/1'):
         meta, raw = parse_ezbk(data)
-        title = meta.get('title', '')
-        print('ezbk: %s / %s' % (title, meta.get('writer', '')))
+        print('ezbk: %s / %s' % (meta.get('title', ''), meta.get('writer', '')))
     else:
-        raw = data
+        meta, raw = {}, data
         print('纯文本')
 
     algo = ALGO_LZ4 if '--lz4' in argv else ALGO_DEFLATE
+    mbytes = build_meta(meta)
 
-    # 校验往返
-    ezb = build_ezb(raw, algo)
+    # 校验往返：偏移表在 meta 之后，解包时别按固定 24 字节算
+    ezb = build_ezb(raw, algo, mbytes)
     back = bytearray()
-    raw_size, _bs, n = struct.unpack_from('<III', ezb, 8)
-    offs = struct.unpack_from('<%dI' % (n + 1), ezb, HDR)
+    raw_size, _bs, n, meta_len = struct.unpack_from('<IIII', ezb, 8)
+    off_base = HDR + meta_len
+    offs = struct.unpack_from('<%dI' % (n + 1), ezb, off_base)
     for k in range(n):
         blk = ezb[offs[k]:offs[k + 1]]
         want = min(BLOCK, raw_size - k * BLOCK)
@@ -216,9 +236,9 @@ def main(argv):
     assert bytes(back) == raw, '往返不一致'
 
     open(dst, 'wb').write(ezb)
-    print('原文 %d B -> %d B (%.1f%%)  块数 %d  algo=%s  -> %s' %
+    print('原文 %d B -> %d B (%.1f%%)  块数 %d  algo=%s  元数据 %d B  -> %s' %
           (len(raw), len(ezb), len(ezb) * 100.0 / max(1, len(raw)), n,
-           'deflate' if algo == ALGO_DEFLATE else 'lz4', dst))
+           'deflate' if algo == ALGO_DEFLATE else 'lz4', len(mbytes), dst))
 
 
 if __name__ == '__main__':

@@ -13,7 +13,8 @@
  *      短按 *  : 由各页面自己定义；主页短按 * = 息屏
  *      息屏    : 长按 0 或 1 唤醒；30 秒无操作自动息屏
  *
- *  分区 no_ota:  app 2MB @0x10000 / data 1.875MB @0x210000
+ *  分区（见 partitions.csv）: app0 1MB @0x10000 / font 704KB @0x110000
+ *                           spiffs 2.18MB @0x1C0000（书库在 /books）
  * ============================================================
  */
 
@@ -873,6 +874,7 @@ static void drawHomeSchedule() {
   {
     bool used[TT_MAX] = {false};
     char tail[64];
+    int  shown = 0;
     for (int k = 0; k < TT_MAX; k++) {
       int best = -1;
       for (int i = 0; i < n; i++) {
@@ -882,8 +884,9 @@ static void drawHomeSchedule() {
         if ((int)c->start <= nowMin) { used[i] = true; continue; }   /* 已过 */
         if (best < 0 || c->start < ttGet(idx[best])->start) best = i;
       }
-      if (best < 0) break;
+      if (best < 0 || shown >= 2) break;    /* 最多两个，再多滚起来就看不过来了 */
       used[best] = true;
+      shown++;
       const TtCourse *c = ttGet(idx[best]);
       durText(d2, sizeof(d2), (int)c->start - nowMin);
       snprintf(tail, sizeof(tail), "，%s后 %s %02u:%02u", d2, c->name,
@@ -996,7 +999,7 @@ static void drawSchedule() {
   int  n   = ttDayList(day, idx, TT_MAX);
   char buf[64], t1[8], t2[8];
 
-  snprintf(buf, sizeof(buf), "课表 %s%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
+  snprintf(buf, sizeof(buf), "课表 %s周%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
   drawTitleBar(buf);
 
   if (n == 0) {
@@ -1067,9 +1070,11 @@ static void drawIdInput() {
   drawCenter(ROW3, "#确认 *返回");
 }
 
-/* 编号 → 应用。编号是二进制位串，长度不限（最多 8 位）
- *   0/00   主页        1/01  精确时钟    10  正计时    11  倒计时
- *   111    课表        100   阅读器      101 蓝牙配置  110 同步
+/* 编号 → 应用。编号是二进制位串，前导 0 不影响结果。
+ *   0/00   主页        1/01  精确时钟    10   正计时
+ *   11     倒计时      100   阅读器（隐藏）      101  蓝牙配置
+ *   111    课表        110   未定义（输入后无效）
+ * 输入最多 ID_MAX_BITS=16 位，够放「8 位前缀 + 8 位编号」。
  */
 /* 应用的三级可见性：
  *   1) 注册进菜单（MENU_COUNT 以内）      —— 主页 # 选
@@ -1155,12 +1160,17 @@ static void fitText(char *dst, size_t dn, const char *src, int maxW) {
   dst[o] = 0;
 }
 
+/* 书目选中行的走马灯状态 */
+static char     gBkMqText[RD_TITLE_MAX] = {0};
+static int      gBkMqOff = 0;
+static uint32_t gBkMqNext = 0;
+
 static void drawBookList() {
   drawTitleBar("阅读器");
   int n = rdBookCount();
   if (n == 0) {
     drawCenter(ROW2, "还没有书");
-    drawCenter(ROW3 + 2, "App 上传 txt");
+    drawCenter(ROW3 + 2, "App 上传 ezzbk");
     return;
   }
   if (gRdSel >= n) gRdSel = n - 1;
@@ -1171,15 +1181,40 @@ static void drawBookList() {
     int k = first + i;
     if (k >= n) break;
     char pct[8], buf[48];
+    const char *title = rdBookTitle(k);       /* 优先用 ezzbk 元数据里的书名 */
     snprintf(pct, sizeof(pct), "%d%%", rdBookPercent(k));
     int pw = textWidthScaled(pct, 1);
-    fitText(buf, sizeof(buf), rdBookName(k), SCREEN_W - pw - 6);
     int y = ROW1 + i * 16;
+
     if (k == gRdSel) {
-      fillRect(0, y, SCREEN_W - 1, y + 14);
-      drawTextMode(2, y, buf, 1, false);
-      drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
+      int tw = textWidthScaled(title, 1);
+      int x = 2;
+      if (tw > SCREEN_W - 4) {
+        /* 选中行放不下：静止 1 秒后横向滚动，滚动时让出整行、不画百分比 */
+        uint32_t now = millis();
+        if (strcmp(gBkMqText, title) != 0) {
+          snprintf(gBkMqText, sizeof(gBkMqText), "%s", title);
+          gBkMqOff = 0;
+          gBkMqNext = now + 1000;
+        }
+        if ((int32_t)(now - gBkMqNext) >= 0) {
+          gBkMqOff += 2;
+          if (gBkMqOff > tw - (SCREEN_W - 4) + 16) { gBkMqOff = 0; gBkMqNext = now + 1000; }
+          else                                      { gBkMqNext = now + 45; }
+        }
+        x = 2 - gBkMqOff;
+        fillRect(0, y, SCREEN_W - 1, y + 14);
+        drawTextMode(x, y, title, 1, false);
+      } else {
+        snprintf(gBkMqText, sizeof(gBkMqText), "%s", title);
+        gBkMqOff = 0;
+        fitText(buf, sizeof(buf), title, SCREEN_W - pw - 6);
+        fillRect(0, y, SCREEN_W - 1, y + 14);
+        drawTextMode(2, y, buf, 1, false);
+        drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
+      }
     } else {
+      fitText(buf, sizeof(buf), title, SCREEN_W - pw - 6);
       drawText(2, y, buf);
       drawText(SCREEN_W - pw - 2, y, pct);
     }
@@ -1262,11 +1297,6 @@ static void drawReader() {
   int w = SCREEN_W * rdPercent() / 100;
   if (w < 1) w = 1;
   hline(0, w - 1, 63);
-}
-
-static void drawStub(const char *title) {
-  drawText(0, ROW0, title);
-  drawCenterScaled(ROW1 + 1, "未实现", 2);
 }
 
 /* toast 覆盖第 4 行 */
@@ -1514,7 +1544,7 @@ static void printPartitions() {
 static void printInfo() {
   logf("\r\n========== 运行信息 ==========\r\n");
   logf("芯片    : %s rev%d %u MHz\r\n", ESP.getChipModel(), ESP.getChipRevision(), (unsigned)ESP.getCpuFreqMHz());
-  logf("固件    : %u KB / 2048 KB\r\n", (unsigned)(ESP.getSketchSize() / 1024));
+  logf("固件    : %u KB / 1024 KB（app0）\r\n", (unsigned)(ESP.getSketchSize() / 1024));
   logf("屏幕    : SSD1306 0x%02X %dx%d  I2C错误 %u\r\n", gOledAddr, SCREEN_W, SCREEN_H, (unsigned)gI2cErr);
   if (gNowOk)
     logf("时钟    : %04u-%02u-%02u %02u:%02u:%02u 周%s\r\n", gNow.year, gNow.month, gNow.day,
@@ -1556,7 +1586,7 @@ static void handleCmd(char *cmd) {
     logf("  contrast 0x7F                    对比度 0-255\r\n");
     logf("  settime YYYY-MM-DD HH:MM:SS      写 DS3231（本地时间）\r\n");
     logf("  verbose on|off                   心跳日志（排查卡顿用）\r\n");
-    logf("  loglevel 0..5                    核心库日志级别（默认2=仅警告）\r\n");
+    logf("  loglevel 0..5                    核心库日志级别（编译默认 0=关）\r\n");
     logf("  ls                               列 LittleFS 文件\r\n");
     logf("==============================\r\n\r\n");
   }
@@ -1599,7 +1629,7 @@ static void handleCmd(char *cmd) {
   else if (*cmd) logf("[命令] 未知: %s\r\n", cmd);
 }
 
-/* 命令行要放得下 URL（wifi curl https://…），64 字节不够 */
+/* 命令行最长 191 字节：settime 带时间戳、长文件名的 ls 都在这条缓冲里拼 */
 static char gCmdBuf[192];
 static uint16_t gCmdLen = 0;
 static void cmdPoll(Stream &s) {

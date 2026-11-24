@@ -25,7 +25,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
-            android:text="NTP 与本地时区"
+            android:text="时区"
             android:textColor="@color/fg"
             android:textSize="18sp"
             android:textStyle="bold" />
@@ -34,31 +34,9 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="时区用于设备在屏幕上换算本地时间。"
+            android:text="设备不联网。这里只定一个换算基准：手机下发的 UTC 时间加上它才是 RTC 里存的本地时间。"
             android:textColor="@color/dim"
             android:textSize="12sp" />
-
-        <com.google.android.material.textfield.TextInputLayout
-            android:id="@+id/tilNtp"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:hint="NTP 服务器"
-            app:boxStrokeColor="@color/accent"
-            app:errorEnabled="true"
-            app:hintTextColor="@color/dim">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/etNtp"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="textUri"
-                android:singleLine="true"
-                android:text="ntp.aliyun.com"
-                android:textColor="@color/fg"
-                android:textSize="15sp" />
-        </com.google.android.material.textfield.TextInputLayout>
 
         <com.google.android.material.textfield.TextInputLayout
             android:id="@+id/tilTz"

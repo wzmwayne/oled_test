@@ -69,7 +69,7 @@ class TimetableActivity : AppCompatActivity() {
                 draft.addAll(list)
                 grid.courses = draft.toList()
                 tvStatus.text = if (list.isEmpty()) "还没有课程，点网格空白处添加"
-                                else "共 " + list.size + " 门 · 点块编辑，点空白新建"
+                                else "共 " + list.size + " 项 · 点块编辑，点空白新建"
             }
         }
     }
@@ -80,7 +80,7 @@ class TimetableActivity : AppCompatActivity() {
         CourseEditDialog.show(this, seed, { c ->
             draft.add(c.copy(index = draft.size))
             grid.courses = draft.toList()
-            tvStatus.text = "已添加（未写入）· 共 " + draft.size + " 门"
+            tvStatus.text = "已添加（未写入）· 共 " + draft.size + " 项"
         })
     }
 
@@ -90,14 +90,14 @@ class TimetableActivity : AppCompatActivity() {
             if (idx >= 0) {
                 draft[idx] = updated.copy(index = idx)
                 grid.courses = draft.toList()
-                tvStatus.text = "已修改（未写入）· 共 " + draft.size + " 门"
+                tvStatus.text = "已修改（未写入）· 共 " + draft.size + " 项"
             }
         }, {
             val idx = draft.indexOfFirst { it === course }
             if (idx >= 0) {
                 draft.removeAt(idx)
                 grid.courses = draft.toList()
-                tvStatus.text = "已删除（未写入）· 共 " + draft.size + " 门"
+                tvStatus.text = "已删除（未写入）· 共 " + draft.size + " 项"
             }
         })
     }
@@ -130,7 +130,7 @@ class TimetableActivity : AppCompatActivity() {
         }
         val scroll = ScrollView(this).apply { addView(tv) }
         MaterialAlertDialogBuilder(this)
-            .setTitle("导出课表（" + draft.size + " 门）")
+            .setTitle("导出课表（" + draft.size + " 项）")
             .setView(scroll)
             .setNegativeButton("关闭", null)
             .setPositiveButton("复制") { _, _ ->
@@ -162,7 +162,7 @@ class TimetableActivity : AppCompatActivity() {
                     draft.clear()
                     draft.addAll(list)
                     grid.courses = draft.toList()
-                    tvStatus.text = "已导入 " + draft.size + " 门（未写入设备）"
+                    tvStatus.text = "已导入 " + draft.size + " 项（未写入设备）"
                 }
             }
             .show()
@@ -204,8 +204,8 @@ class TimetableActivity : AppCompatActivity() {
             handler.post {
                 if (dlg.isShowing) dlg.dismiss()
                 if (ok) {
-                    tvStatus.text = "已写入 " + draft.size + " 门"
-                    Toast.makeText(this, "已写入 " + draft.size + " 门", Toast.LENGTH_SHORT).show()
+                    tvStatus.text = "已写入 " + draft.size + " 项"
+                    Toast.makeText(this, "已写入 " + draft.size + " 项", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(this, err ?: "写入失败", Toast.LENGTH_LONG).show()
                 }

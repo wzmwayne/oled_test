@@ -260,13 +260,18 @@ static void handleJson(const char *in, size_t len) {
     File dir = LittleFS.open(BOOK_DIR);
     if (dir) {
       File f = dir.openNextFile();
-      while (f && n < 8) {
+      while (f && n < 16) {                 /* 与固件书目上限 RD_BOOK_MAX 一致 */
         if (!f.isDirectory()) {
           const char *nm = f.name();
           const char *slash = strrchr(nm, '/');
+          const char *base = slash ? slash + 1 : nm;
+          char bt[RD_TITLE_MAX];
           JsonObject o = arr.add<JsonObject>();
-          o["name"] = slash ? slash + 1 : nm;
+          o["name"] = base;
           o["size"] = (uint32_t)f.size();
+          /* 容器元数据里的书名，设备书目显示的也是它；没有就不带这个字段 */
+          rdBookMetaTitle(base, bt, sizeof(bt));
+          if (bt[0]) o["t"] = bt;
           n++;
         }
         f.close();
@@ -538,7 +543,7 @@ static void handleJson(const char *in, size_t len) {
     int idx = ttAddEx(name, day, start, end, par, glob);
     if (idx < 0) {
       resp["ok"]  = false;
-      resp["msg"] = "保存失败：名称/星期/时间不合法，或已满 60 条";
+      resp["msg"] = "保存失败：名称/星期/时间不合法，或已满 72 条";
     } else {
       resp["ok"]  = true;
       resp["msg"] = "已保存";

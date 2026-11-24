@@ -22,6 +22,8 @@ extern int  appCpWidth(uint32_t cp);     /* 主固件：字库里的字宽，缺
 #define RD_TOC_MAX   96
 #define RD_TOC_NAME  40
 #define EZB_BLOCK    16384   /* 块上限，实际值以文件头为准 */
+#define EZB_HDR_V01  24      /* v0.1 头长：magic|algo|flags|rsv|rawSize|blockSize|blockCount|metaLen */
+#define EZB_META_MAX 4096    /* 元数据区上限，超了按头部损坏处理 */
 #define RD_HIST_MAX  64
 #define RD_BUF_SIZE  1024
 #define RD_NVS_NS    "rd"
@@ -63,6 +65,7 @@ static int      gHistN = 0;
 
 /* 书目 */
 static char     gBooks[RD_BOOK_MAX][RD_NAME_MAX];
+static char     gBookTitle[RD_BOOK_MAX][RD_TITLE_MAX];   /* 元数据书名，空则用文件名 */
 static uint32_t gBookSize[RD_BOOK_MAX];
 static uint32_t gBookPos[RD_BOOK_MAX];
 static uint32_t gBookRaw[RD_BOOK_MAX];   /* 未压缩长度：ezzbk 用头部里的 rawSize，txt 就是文件大小 */
@@ -351,16 +354,151 @@ static bool isBook(const char *n) {
 }
 
 /* .ezzbk 头里的原始长度；不是 EZZB 就返回文件大小 */
-static uint32_t bookRawSize(File &f) {
+static inline uint32_t rd32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* ezzbk 头部字段 */
+typedef struct {
+  uint8_t  algo;
+  uint32_t raw;      /* 解压后的正文长度 */
+  uint32_t bs;       /* 块大小 */
+  uint32_t cnt;      /* 块数 */
+  uint32_t offBase;  /* 偏移表起始位置 = 头长 + metaLen */
+  uint32_t metaLen;  /* 元数据区长度，旧头为 0 */
+} EzbHdr;
+
+static bool rdU32At(File &f, uint32_t pos, uint32_t *v) {
+  uint8_t b[4];
+  if (!f.seek(pos) || f.read(b, 4) != 4) return false;
+  *v = rd32(b);
+  return true;
+}
+
+/* 解析 ezzbk 头。
+ *
+ * v0.1（当前规范）：
+ *   "EZZB"|u8 algo|u8 flags|u16 rsv|u32 rawSize|u32 blockSize|u32 blockCount
+ *   |u32 metaLen | meta[metaLen] | u32 off[blockCount+1]
+ * 旧 20 字节头（无 meta 区）与更旧 16 字节头（无 algo/flags）也认。
+ * 三种布局字段位置互相重叠，只能靠 off[0]=偏移表末尾、off[cnt]=文件长度 对账
+ * 区分——rawSize 的低字节可能恰好落在 algo 位上，只看字段不可靠。 */
+static bool ezbHeader(File &f, EzbHdr *hd) {
+  hd->algo = 0; hd->raw = 0; hd->bs = EZB_BLOCK; hd->cnt = 0;
+  hd->offBase = 0; hd->metaLen = 0;
+
+  uint32_t fsz = (uint32_t)f.size();
+  uint8_t h[24] = {0};
+  if (!f.seek(0)) return false;
+  int hn = f.read(h, 24);
+  if (hn < 16 || memcmp(h, "EZZB", 4)) return false;
+
+  for (int pass = 0; pass < 3; pass++) {
+    uint32_t algo, raw, bs, cnt, base = 0, metaLen = 0;
+    if (pass == 0) {                        /* v0.1：带 meta 区 */
+      if (hn < 24) continue;
+      algo    = h[4];
+      raw     = rd32(h + 8);
+      bs      = rd32(h + 12);
+      cnt     = rd32(h + 16);
+      metaLen = rd32(h + 20);
+      if (metaLen > EZB_META_MAX) continue;
+      base = EZB_HDR_V01 + metaLen;
+    } else if (pass == 1) {                 /* 20 字节头，无 meta */
+      algo = h[4];
+      raw  = rd32(h + 8);
+      bs   = rd32(h + 12);
+      cnt  = rd32(h + 16);
+      base = 20;
+    } else {                                /* 16 字节头，只有 LZ4 */
+      algo = 0;
+      raw  = rd32(h + 4);
+      bs   = rd32(h + 8);
+      cnt  = rd32(h + 12);
+      base = 16;
+    }
+
+    if (algo > 1 || raw == 0 || bs == 0 || bs > EZB_BLOCK) continue;
+    if (cnt == 0 || cnt > 4096) continue;
+    if (base + 4 * (cnt + 1) > fsz) continue;
+
+    uint32_t o0, on;
+    if (!rdU32At(f, base, &o0) || !rdU32At(f, base + 4 * cnt, &on)) continue;
+    if (o0 != base + 4 * (cnt + 1) || on != fsz || on <= o0) continue;
+
+    hd->algo    = (uint8_t)algo;
+    hd->raw     = raw;
+    hd->bs      = bs;
+    hd->cnt     = cnt;
+    hd->offBase = base;
+    hd->metaLen = metaLen;
+    return true;
+  }
+  return false;
+}
+
+/* UTF-8 截断落在多字节字符中间时，回退到上一个字符边界 */
+static void utf8TrimTail(char *s) {
+  size_t n = strlen(s), i = n;
+  while (i > 0 && ((uint8_t)s[i - 1] & 0xC0) == 0x80) i--;   /* 跳过续字节 */
+  if (i == 0) { s[0] = 0; return; }
+  i--;                                                       /* i 指向该字符首字节 */
+  uint8_t c = (uint8_t)s[i];
+  size_t need = (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 :
+                (c & 0xF8) == 0xF0 ? 4 : 1;
+  if (i + need > n) s[i] = 0;
+}
+
+/* 取 meta 区里某个键的值。键值按第一个 '=' 分割，值里可以有 '='。
+ * 值内的 \n \r 还原成空格（单行显示），\\ 还原成反斜杠。找不到留空串。 */
+static void metaGet(File &f, const EzbHdr &hd, const char *key, char *val, size_t vn) {
+  if (vn == 0) return;
+  val[0] = 0;
+  if (!hd.metaLen || hd.metaLen > EZB_META_MAX) return;
+
+  /* 元数据区很小（几十到几百字节），临时借一次堆，不占常驻 RAM */
+  uint8_t *buf = (uint8_t *)malloc(hd.metaLen);
+  if (!buf) return;
+  if (!f.seek(EZB_HDR_V01) || f.read(buf, hd.metaLen) != hd.metaLen) { free(buf); return; }
+
+  size_t kl = strlen(key);
+  uint32_t i = 0;
+  while (i < hd.metaLen) {
+    uint32_t j = i;
+    while (j < hd.metaLen && buf[j] != '\n') j++;
+    if (j > i + kl && !memcmp(buf + i, key, kl) && buf[i + kl] == '=') {
+      size_t o = 0;
+      for (uint32_t k = i + kl + 1; k < j && o + 1 < vn; k++) {
+        char c = (char)buf[k];
+        if (c == '\\' && k + 1 < j) {
+          c = (char)buf[++k];
+          if (c == 'n' || c == 'r') c = ' ';
+        }
+        val[o++] = c;
+      }
+      val[o] = 0;
+      while (o > 0 && val[o - 1] == ' ') { o--; val[o] = 0; }
+      utf8TrimTail(val);
+      break;
+    }
+    i = j + 1;
+  }
+  free(buf);
+}
+
+/* 读一本书的元数据：未压缩长度 + 书名（meta 里的 title） */
+static void bookMeta(File &f, uint32_t *raw, char *title, size_t tn) {
   uint32_t fsz = (uint32_t)f.size();
   uint32_t save = f.position();
-  uint8_t  h[20];
-  f.seek(0);
-  int n = f.read(h, 20);
+  title[0] = 0;
+  *raw = fsz;
+
+  EzbHdr hd;
+  if (ezbHeader(f, &hd)) {
+    *raw = hd.raw;
+    metaGet(f, hd, "title", title, tn);
+  }
   f.seek(save);
-  if (n == 20 && !memcmp(h, "EZZB", 4))
-    return (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
-  return fsz;
 }
 
 void rdScan() {
@@ -380,7 +518,7 @@ void rdScan() {
         if (isBook(base)) {
           snprintf(gBooks[gBookN], RD_NAME_MAX, "%s", base);
           gBookSize[gBookN] = (uint32_t)f.size();
-          gBookRaw[gBookN]  = bookRawSize(f);
+          bookMeta(f, &gBookRaw[gBookN], gBookTitle[gBookN], RD_TITLE_MAX);
           if (gBookRaw[gBookN] == 0) gBookRaw[gBookN] = gBookSize[gBookN];
           gBookN++;
         }
@@ -394,20 +532,24 @@ void rdScan() {
   /* 按名字排序，列表位置才稳定 */
   for (int i = 1; i < gBookN; i++) {
     char tn[RD_NAME_MAX];
+    char tt[RD_TITLE_MAX];
     uint32_t ts, tr;
     snprintf(tn, sizeof(tn), "%s", gBooks[i]);
     ts = gBookSize[i];
     tr = gBookRaw[i];
+    snprintf(tt, sizeof(tt), "%s", gBookTitle[i]);
     int j = i - 1;
     while (j >= 0 && strcmp(gBooks[j], tn) > 0) {
       snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", gBooks[j]);
       gBookSize[j + 1] = gBookSize[j];
       gBookRaw[j + 1]  = gBookRaw[j];
+      snprintf(gBookTitle[j + 1], RD_TITLE_MAX, "%s", gBookTitle[j]);
       j--;
     }
     snprintf(gBooks[j + 1], RD_NAME_MAX, "%s", tn);
     gBookSize[j + 1] = ts;
     gBookRaw[j + 1]  = tr;
+    snprintf(gBookTitle[j + 1], RD_TITLE_MAX, "%s", tt);
   }
 
   /* 进度：只保留还在的书，孤儿进度直接删 */
@@ -445,8 +587,28 @@ void rdScan() {
 
 int rdBookCount() { return gBookN; }
 
+const char *rdBookTitle(int i) {
+  if (i < 0 || i >= gBookN) return "";
+  return gBookTitle[i][0] ? gBookTitle[i] : gBooks[i];
+}
+
 const char *rdBookName(int i) {
   return (i >= 0 && i < gBookN) ? gBooks[i] : "";
+}
+
+/* 蓝牙书目要显示书名，但不一定先扫过书目，所以这里直接开文件读 meta */
+void rdBookMetaTitle(const char *name, char *title, size_t tn) {
+  if (!title || tn == 0) return;
+  title[0] = 0;
+  if (!name || !*name) return;
+
+  char path[64];
+  snprintf(path, sizeof(path), RD_DIR "/%s", name);
+  File f = LittleFS.open(path, "r");
+  if (!f) return;
+  uint32_t raw = 0;
+  bookMeta(f, &raw, title, tn);
+  f.close();
 }
 
 int rdBookPercent(int i) {
@@ -498,63 +660,54 @@ bool rdOpenIndex(int i) {
   uint8_t magic[4] = {0};
   gFile.seek(0);
   if (gFile.read(magic, 4) == 4 && !memcmp(magic, "EZZB", 4)) {
-    /* v2: "EZZB"|algo|flags|rsv(2)|rawSize|blockSize|blockCount|off[n+1]  头 20B
-       旧: "EZZB"|rawSize|blockSize|blockCount|off[n+1]                   头 16B
-       两者靠 off[0]/off[n] 与文件长度对账区分（rawSize 低字节可能恰好是 0/1，不可靠）。 */
-    uint8_t h[20] = {0};
-    gFile.seek(0);
-    int hn = gFile.read(h, 20);
-    const uint32_t fsz = (uint32_t)gFile.size();
-
-    bool ok = false;
-    for (int pass = 0; pass < 2 && !ok; pass++) {
-      uint32_t n_algo, raw, bs, cnt, hdrLen;
-      if (pass == 0) {                       /* 新布局 */
-        if (hn < 20) continue;
-        n_algo = h[4];
-        raw = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
-        bs  = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
-        cnt = (uint32_t)h[16] | ((uint32_t)h[17] << 8) | ((uint32_t)h[18] << 16) | ((uint32_t)h[19] << 24);
-        hdrLen = 20;
-        if (n_algo > 1) continue;
-      } else {                               /* 旧布局，只支持 LZ4 */
-        if (hn < 16) continue;
-        n_algo = 0;
-        raw = (uint32_t)h[4] | ((uint32_t)h[5] << 8) | ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
-        bs  = (uint32_t)h[8] | ((uint32_t)h[9] << 8) | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
-        cnt = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
-        hdrLen = 16;
-      }
-      if (bs == 0 || bs > EZB_BLOCK || cnt == 0 || cnt > 4096 || raw == 0) continue;
-      if (hdrLen + 4 * (cnt + 1) > fsz) continue;
-
-      uint32_t *off = (uint32_t *)malloc((cnt + 1) * sizeof(uint32_t));
-      if (!off) continue;
-      gFile.seek(hdrLen);
-      if (gFile.read((uint8_t *)off, (cnt + 1) * sizeof(uint32_t)) !=
-          (int)((cnt + 1) * sizeof(uint32_t))) {
-        free(off);
-        continue;
-      }
-      /* 对账：首块紧跟头部，末块正好落在文件尾 */
-      if (off[0] != hdrLen + 4 * (cnt + 1) || off[cnt] != fsz) { free(off); continue; }
-
-      gBlkOff = off;
-      gAlgo = (uint8_t)n_algo;
-      gBlkSize = bs;
-      gBlkCount = cnt;
-      gSize = raw;
-      gEzb = true;
-      ok = true;
-    }
-
-    if (!gEzb) {
+    /* 头部三种布局统一走 ezbHeader()，旧 20/16 字节头的书照样能打开 */
+    EzbHdr hd;
+    if (!ezbHeader(gFile, &hd)) {
       appLog("[阅读] %s 是 EZZB 但头部损坏\r\n", gName);
       gFile.close();
       return false;
     }
-    appLog("[阅读] EZZB algo=%s 块=%u 块数=%u\r\n",
-           gAlgo == 1 ? "deflate" : "lz4", (unsigned)gBlkSize, (unsigned)gBlkCount);
+
+    const uint32_t fsz = (uint32_t)gFile.size();
+    size_t want = (size_t)(hd.cnt + 1) * sizeof(uint32_t);
+    uint32_t *off = (uint32_t *)malloc(want);
+    if (!off) {
+      appLog("[阅读] 偏移表内存不够（%u 块）\r\n", (unsigned)hd.cnt);
+      gFile.close();
+      return false;
+    }
+    gFile.seek(hd.offBase);
+    if (gFile.read((uint8_t *)off, want) != want) {
+      free(off);
+      appLog("[阅读] %s 偏移表读不出来\r\n", gName);
+      gFile.close();
+      return false;
+    }
+
+    /* 偏移必须严格递增、落在文件内：块数据坏在末尾时 file.read 会短读，别硬解 */
+    bool good = true;
+    for (uint32_t k = 0; k <= hd.cnt; k++) {
+      if (off[k] > fsz || (k > 0 && off[k] <= off[k - 1])) { good = false; break; }
+    }
+    if (!good || off[0] != hd.offBase + 4 * (hd.cnt + 1) || off[hd.cnt] != fsz) {
+      free(off);
+      appLog("[阅读] %s 的 EZZB 偏移表越界\r\n", gName);
+      gFile.close();
+      return false;
+    }
+
+    gBlkOff   = off;
+    gAlgo     = hd.algo;
+    gBlkSize  = hd.bs;
+    gBlkCount = hd.cnt;
+    gSize     = hd.raw;
+    gEzb      = true;
+
+    char bt[RD_TITLE_MAX];
+    metaGet(gFile, hd, "title", bt, sizeof(bt));
+    appLog("[阅读] EZZB algo=%s 块=%u 块数=%u 元数据=%u%s%s\r\n",
+           gAlgo == 1 ? "deflate" : "lz4", (unsigned)gBlkSize, (unsigned)gBlkCount,
+           (unsigned)hd.metaLen, bt[0] ? " 书名=" : "", bt);
   }
 
   gOpen = true;

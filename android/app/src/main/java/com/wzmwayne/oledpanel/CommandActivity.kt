@@ -59,20 +59,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
     private var lastTtCount = 0
     private var lastWeekParity = 0
 
-    private var pendingLocationAction: (() -> Unit)? = null
-
-    private val locationLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        val action = pendingLocationAction
-        pendingLocationAction = null
-        if (!granted) {
-            toast("未授予位置权限，将只能手动输入 WiFi 名称")
-        }
-        action?.invoke()
-    }
-
-    /** 选 txt 用系统文件选择器，避免申请全盘存储权限 */
+    /** 选文件用系统文件选择器，避免申请全盘存储权限 */
     private val bookLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -144,7 +131,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
 
     private fun setupRows() {
         bindRow(R.id.rowPing, "ping", "连通性自检，设备返回 pong") { doPing() }
-        bindRow(R.id.rowGet, "get", "读取 NTP、时区、WiFi 与课表概况") { doGet() }
+        bindRow(R.id.rowGet, "get", "读取时区、课表数量、本周单双周与剩余空间") { doGet() }
 
         bindRow(R.id.rowGetTime, "gettime", "读取设备 RTC 时间") { doGetTime() }
         bindRow(R.id.rowSetTime, "settime", "选择本地时间并写入设备") { doSetTime() }
@@ -152,9 +139,9 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         bindRow(R.id.rowSetNtp, "设置时区", "设备不联网，时区只用于把手机时间换算成本地时间") { doSetTz() }
 
         bindRow(R.id.rowCourseView, "查看课表", "分页读取完整课表") { showCourses() }
-        bindRow(R.id.rowCourseAdd, "添加课程", "名称、星期、时间、单双周") { doAddCourse() }
+        bindRow(R.id.rowCourseAdd, "添加课程", "名称、星期、时间、单双周（事件请在「课表」界面加）") { doAddCourse() }
         bindRow(R.id.rowCourseClear, "清空课表", "删除全部课程", danger = true) { confirmClearCourses() }
-        bindRow(R.id.rowBooks, "书籍 / 上传 txt", "查看设备上的书，或从本机选文件上传") { showBooks() }
+        bindRow(R.id.rowBooks, "书籍 / 上传", "查看设备上的 .ezzbk，或从本机选文件上传") { showBooks() }
 
         bindRow(R.id.rowUnpair, "unpair", "清除配对并重新生成 PIN", danger = true) { confirmUnpair() }
     }
@@ -243,7 +230,8 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                     listOf(
                         "时区" to tzText(lastTz),
                         "课表数量" to lastTtCount.toString() + " 条",
-                        "本周" to weekParityText(lastWeekParity)
+                        "本周" to weekParityText(lastWeekParity),
+                        "剩余空间" to formatKb(p.optLong("fs_free", -1L))
                     )
                 )
             } else {
@@ -350,13 +338,9 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
 
     private fun doSetTz() {
         val (dialog, view) = showSheet(R.layout.sheet_ntp)
-        val tilNtp = view.findViewById<TextInputLayout>(R.id.tilNtp)
-        val etNtp = view.findViewById<TextInputEditText>(R.id.etNtp)
         val acTz = view.findViewById<MaterialAutoCompleteTextView>(R.id.acTz)
         val tilCustom = view.findViewById<TextInputLayout>(R.id.tilCustomTz)
         val etCustom = view.findViewById<TextInputEditText>(R.id.etCustomTz)
-
-        tilNtp.visibility = View.GONE
 
         val options = tzOptions()
         val labels = options.map { it.first }
@@ -434,7 +418,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                 if (idx >= 0) doAddCourse(draft[idx]) { updated ->
                     draft[idx] = updated.copy(index = idx)
                     adapter.submit(draft.toList())
-                    status.text = "已修改（未写入）· 共 " + draft.size + " 门"
+                    status.text = "已修改（未写入）· 共 " + draft.size + " 项"
                 }
             },
             onLongClick = { c ->
@@ -447,7 +431,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                         .setPositiveButton("移除") { _, _ ->
                             draft.removeAt(idx)
                             adapter.submit(draft.toList())
-                            status.text = "已移除（未写入）· 共 " + draft.size + " 门"
+                            status.text = "已移除（未写入）· 共 " + draft.size + " 项"
                         }
                         .show()
                 }
@@ -461,7 +445,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             doAddCourse(null) { c ->
                 draft.add(c.copy(index = draft.size))
                 adapter.submit(draft.toList())
-                status.text = "已添加（未写入）· 共 " + draft.size + " 门"
+                status.text = "已添加（未写入）· 共 " + draft.size + " 项"
             }
         }
 
@@ -475,7 +459,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                 }
             }
             adapter.submit(draft.toList())
-            status.text = if (n == 0) "草稿里没有单双周课程" else "已互换 " + n + " 门（未写入）"
+            status.text = if (n == 0) "草稿里没有单双周课程" else "已互换 " + n + " 项（未写入）"
         }
 
         view.findViewById<MaterialButton>(R.id.btnReloadCourses).setOnClickListener {
@@ -502,7 +486,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             draft.addAll(list)
             adapter.submit(draft.toList())
             status.text = if (list.isEmpty()) "设备上没有课程，点「添加课程」开始"
-                          else "共 " + total + " 门 · 点按编辑，长按移除"
+                          else "共 " + total + " 项 · 点按编辑，长按移除"
         }
     }
 
@@ -556,8 +540,8 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         if (isFinishing || !dlg.isShowing) return
         if (i >= list.size) {
             dlg.dismiss()
-            toast("已写入 " + list.size + " 门课")
-            status.text = "已写入 " + list.size + " 门"
+            toast("已写入 " + list.size + " 项课")
+            status.text = "已写入 " + list.size + " 项"
             return
         }
         val c = list[i]
@@ -570,7 +554,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         BleManager.send(pin, "addcourse", params) { res, _ ->
             if (res?.ok != true) {
                 if (dlg.isShowing) dlg.dismiss()
-                toast("第 " + (i + 1) + " 门写入失败：" + (res?.msg ?: "设备无响应"))
+                toast("第 " + (i + 1) + " 项写入失败：" + (res?.msg ?: "设备无响应"))
                 return@send
             }
             dlg.setMessage("" + (i + 1) + " / " + list.size)
@@ -596,7 +580,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
                 if (list.isEmpty()) {
                     status.text = "暂无课程"
                 } else {
-                    status.text = "共 " + total + " 门课 · 长按可删除"
+                    status.text = "共 " + total + " 项课 · 长按可删除"
                 }
             }
         }
@@ -826,7 +810,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
             if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
-                    list.add(Book(o.optString("name", ""), o.optLong("size", 0)))
+                    list.add(Book(o.optString("name", ""), o.optLong("size", 0), o.optString("t", "")))
                 }
             }
             adapter.submit(list)
@@ -835,9 +819,12 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
     }
 
     private fun confirmDeleteBook(book: Book, status: TextView, refresh: () -> Unit) {
+        val label = book.title.ifBlank { book.name }
+        val msg = if (label == book.name) "确定删除「" + label + "」？"
+                  else "确定删除「" + label + "」（" + book.name + "）？"
         MaterialAlertDialogBuilder(this)
             .setTitle("删除书籍")
-            .setMessage("确定删除「" + book.name + "」？")
+            .setMessage(msg)
             .setNegativeButton("取消", null)
             .setPositiveButton("删除") { _, _ ->
                 val pin = requirePin() ?: return@setPositiveButton
@@ -920,8 +907,15 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         })
     }
 
+    /** 字节数转人话；负数表示设备没报这个字段 */
+    private fun formatKb(bytes: Long): String = when {
+        bytes < 0 -> "未知"
+        bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / 1024f / 1024f)
+        else -> String.format("%.1f KB", bytes / 1024f)
+    }
+
     private fun queryDisplayName(uri: Uri): String {
-        var name = "book.txt"
+        var name = "book.ezzbk"
         try {
             contentResolver.query(uri, null, null, null, null)?.use { c ->
                 val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)

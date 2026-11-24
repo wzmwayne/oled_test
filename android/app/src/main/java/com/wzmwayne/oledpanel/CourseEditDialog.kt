@@ -75,7 +75,7 @@ object CourseEditDialog {
             isChecked = isEvent
         }
         val cbGlobal = CheckBox(ctx).apply {
-            text = "全局事件（始终追加在主页滚动条末尾，如「放学」）"
+            text = "全局事件（每天都算，主页滚动条末尾按时间追加，如「放学」）"
             isChecked = isGlobal
             visibility = if (isEvent) View.VISIBLE else View.GONE
         }
