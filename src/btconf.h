@@ -1,9 +1,10 @@
 /*
  * btconf.h - 蓝牙配置模块
  *
- * 单特征 JSON 协议：
- *   手机 WRITE  {"pin":"483920","action":"setwifi","params":{"ssid":"..","pass":".."}}
- *   设备 NOTIFY {"ok":true,"action":"setwifi","msg":"已保存"}
+ * 两个特征：命令通道走 JSON（一问一答），数据通道走纯二进制（传书）。
+ *   手机 WRITE  {"pin":"483920","action":"settz","params":{"tz":8}}
+ *   设备 NOTIFY {"ok":true,"action":"settz","msg":"时区已保存"}
+ * 全部动作见 docs/ble-protocol.md。
  *
  * 生命周期：进入蓝牙配置页 -> btBegin()；离开 -> btEnd()
  * PIN 每次 btBegin/btClearBonds 时重新生成 6 位随机数
