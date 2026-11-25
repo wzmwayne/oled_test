@@ -720,6 +720,23 @@ static char     gToast[40] = {0};
 static uint32_t gToastUntil = 0;
 static void toast(const char *m, uint32_t ms) { strncpy(gToast, m, sizeof(gToast) - 1); gToastUntil = millis() + ms; }
 
+/* 倒计时归零：全屏闪 5 秒（白/黑 250ms 交替），按任意键停止。
+ * 直接盖在画面上而不是画文字——全屏闪一眼就能看见，不用盯着屏幕看内容。 */
+#define FLASH_MS    5000
+#define FLASH_STEP  250
+static uint32_t gFlashUntil = 0;
+static uint32_t gFlashNext  = 0;
+static bool     gFlashWhite = false;
+
+static bool flashActive() { return gFlashUntil && (int32_t)(millis() - gFlashUntil) < 0; }
+static void flashStart()  {
+  gFlashUntil = millis() + FLASH_MS;
+  gFlashNext  = 0;
+  gFlashWhite = false;
+  gLastActivity = millis();      /* 别一闪完就被 30 秒自动息屏吃掉 */
+}
+static void flashStop()   { gFlashUntil = 0; }
+
 /* 时间缓存：1 Hz 读 RTC，毫秒用 millis 补 */
 static RtcTime  gNow;
 static bool     gNowOk = false;
@@ -787,6 +804,7 @@ static void screenWake() {
   if (!gScreenOff) return;
   gScreenOff = false;
   oledCmd(0xAF);
+  rtcTick();               /* 息屏期间没读 RTC，醒来先对一次 */
   gPrevValid = false;      /* 息屏时屏幕被清空过，唤醒必须整屏重画 */
   keyLock();               /* 唤醒用的长按不能漏进应用 */
   gLastActivity = millis();
@@ -800,7 +818,6 @@ static void wakeUp(WakeSource src) {
     mqHold();                       /* 亮屏后先让滚动条停 1.5 秒 */
     logf("[唤醒] 来源 %s\r\n", WAKE_NAME[src]);
   }
-  if (src == WAKE_TIMER_DONE) toast("时间到", 4000);
 }
 
 /* ---------------- 走马灯 ----------------
@@ -814,6 +831,7 @@ static void wakeUp(WakeSource src) {
 static uint32_t gMqKey  = 0;
 static int16_t  gMqOff  = 0;
 static uint32_t gMqNext = 0;
+static bool     gMqOn   = false;  /* 文案超屏，处于滚动状态 */
 
 #define MQ_HOLD_MS 1500
 
@@ -830,14 +848,24 @@ static void mqHold() {
   gMqKey  = 0;
 }
 
+/* 这一帧是否必须重画走马灯：静止（放得下 / 起滚前的停顿）时返回 false，
+ * 主循环据此把主页刷新从 16fps 降到「每秒一次」。 */
+static bool mqWantsFrame() {
+  if (!gMqOn) return false;
+  if (gMqOff == 0 && (int32_t)(millis() - gMqNext) < 0) return false;
+  return true;
+}
+
 static void drawMarquee(int y, const char *s) {
   int w = textWidthScaled(s, 1);
   uint32_t k = mqKey(s);
   if (w <= SCREEN_W) {
+    gMqOn = false;
     gMqKey = k; gMqOff = 0;
     drawCenter(y, s);
     return;
   }
+  gMqOn = true;
   if (k != gMqKey) {                      /* 文案变了就从头滚 */
     gMqKey = k;
     gMqOff = 0;
@@ -873,7 +901,7 @@ static void durText(char *buf, size_t n, int min) {
  * 后面那句（下节 / 下下节）没有对应课程时整段省掉，不显示「无」。
  * 名词用课名，时间统一成人话（"45分" / "1小时20分"）。 */
 static void drawHomeSchedule() {
-  if (!gNowOk) { drawCenter(ROW3, "--"); return; }
+  if (!gNowOk) { gMqOn = false; drawCenter(ROW3, "--"); return; }
 
   char line[160], d1[16], d2[16];
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
@@ -1423,6 +1451,9 @@ static void handleKeys() {
     if (gEvt[i].shortPress || gEvt[i].longPress || gEvt[i].repeat) { any = true; break; }
   if (any) gLastActivity = millis();
 
+  /* 倒计时闪烁期间，任意键都算"我看见了"，直接停 */
+  if (any && flashActive()) { flashStop(); return; }
+
   bool starS = gEvt[KEY_STAR].shortPress, starL = gEvt[KEY_STAR].longPress;
   bool hashS = gEvt[KEY_HASH].shortPress, hashL = gEvt[KEY_HASH].longPress;
   bool zeroS = gEvt[KEY_0].shortPress,  oneS  = gEvt[KEY_1].shortPress;
@@ -1776,6 +1807,9 @@ void loop() {
   uint32_t tLoop = micros();
   static uint32_t lastRtc = 0, lastDraw = 0;
   static bool toastPrev = false;
+  static uint8_t homeSec = 255;    /* 主页上一帧画的是哪一秒 */
+  static int lastAppDrawn = -1, lastScrDrawn = -1;
+  static bool flashWas = false;
 
   keysPoll();
   if (Serial) cmdPoll(Serial);
@@ -1798,15 +1832,20 @@ void loop() {
 
   if (gContrastDirty && (int32_t)(now - gContrastSaveAt) >= 0) contrastSave();
 
-  if (now - lastRtc >= 1000) { lastRtc = now; rtcTick(); }
+  /* RTC 只在亮屏时读（1 秒一次，只为让秒数变）；息屏期间一次都不读——
+   * 屏幕黑着没人看时间，而计时/课表都以 gNow 为锚点、用 millis 偏移推进，
+   * 不依赖轮询频率。唤醒时 screenWake() 会立即补读一次，所以醒来显示的
+   * 时间永远是刚读到的，不会用到过期的 gNow。 */
+  if (!gScreenOff && now - lastRtc >= 1000) { lastRtc = now; rtcTick(); }
 
   /* 倒计时归零 */
   if (gTdRun && tdRemain() == 0) {
     gTdRun = false;
     gTdTotal = 0;
     wakeLockRelease(WL_TIMER, "倒计时");
+    flashStart();
     wakeUp(WAKE_TIMER_DONE);
-    logf("[计时] 倒计时归零\r\n");
+    logf("[计时] 倒计时归零，闪屏提示\r\n");
   }
 
   /* 30 秒无操作自动息屏 */
@@ -1818,12 +1857,33 @@ void loop() {
     bool toastNow = (now < gToastUntil);
     if (toastNow != toastPrev) { toastPrev = toastNow; lastDraw = 0; }
 
+    /* 倒计时闪烁：白/黑 250ms 交替 */
+    bool flashing = flashActive();
+    if (flashing && (int32_t)(now - gFlashNext) >= 0) {
+      gFlashNext  = now + FLASH_STEP;
+      gFlashWhite = !gFlashWhite;
+    }
+    if (flashWas && !flashing) { lastDraw = 0; homeSec = 255; lastAppDrawn = -1; }
+    flashWas = flashing;
+
     /* 走毫秒的页面都要高帧率；局部刷新后单帧 2-3ms，60fps 撑得住 */
     uint32_t interval = 120;
-    if (gScr == SCR_APP && gApp == APP_HOME)      interval = 60;   /* 走马灯 45ms 一步 */
+    bool wantFrame = true;
+
+    if (gScr == SCR_APP && gApp == APP_HOME) {
+      interval = 60;                                   /* 走马灯 45ms 一步 */
+      /* 主页只有三样东西会变：秒数、走马灯、toast。
+       * 走马灯静止时不必每秒重画十几次——只在秒数变了才出一帧。 */
+      bool secChanged = !gNowOk || gNow.second != homeSec;
+      /* !gPrevValid：刚唤醒/刚开机，GDDRAM 里是上一帧，必须整屏重画一次
+       * ctxChanged：从菜单/别的应用切回主页，画面上还是旧内容 */
+      bool ctxChanged = (gApp != lastAppDrawn || gScr != lastScrDrawn);
+      wantFrame = secChanged || mqWantsFrame() || toastNow || toastPrev
+                  || !gPrevValid || ctxChanged || flashing;
+    }
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
-    if (now - lastDraw >= interval) {
+    if (wantFrame && now - lastDraw >= interval) {
       lastDraw = now;
       clearBuf();
       if (gScr == SCR_MENU)    drawMenu();
@@ -1840,7 +1900,11 @@ void loop() {
         }
       }
       drawToast();
+      if (flashing) memset(gBuf, gFlashWhite ? 0xFF : 0x00, sizeof(gBuf));  /* 整屏盖掉 */
       if (gOledOk) flushDiff();
+      if (gScr == SCR_APP && gApp == APP_HOME) homeSec = gNowOk ? gNow.second : 255;
+      lastAppDrawn = gApp;
+      lastScrDrawn = gScr;
 
       gAnimTick++;
 
@@ -1855,5 +1919,10 @@ void loop() {
 
   uint32_t dt = (micros() - tLoop) / 1000;
   if (dt > gLoopMaxMs) gLoopMaxMs = dt;
+
+  /* 让出 CPU：以前 loop 全程空转，160MHz 一直满跑，纯白耗电。
+   * 这里按状态睡一小觉，空转时进 WFI；息屏后只有按键需要响应，睡得更长。
+   * 放在 dt 统计之后，免得把睡眠时间算进"最坏循环耗时"。 */
+  delay(gScreenOff ? 8 : 1);
 }
 
