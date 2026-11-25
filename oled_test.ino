@@ -404,6 +404,16 @@ static void drawTitleBar(const char *title) {
   hline(0, SCREEN_W - 1, 14);
 }
 
+/* 标题栏右侧再挂一小段文字（目录页显示整本书的进度） */
+static void drawTitleBarRight(const char *title, const char *right) {
+  drawText(2, 0, title);
+  int rw = textWidthScaled(right, 1);
+  int lw = textWidthScaled(title, 1);
+  if (rw > 0 && 2 + lw + 6 <= SCREEN_W - rw - 2)      /* 挤不下就不画，别叠在一起 */
+    drawText(SCREEN_W - rw - 2, 0, right);
+  hline(0, SCREEN_W - 1, 14);
+}
+
 /* 加载占位：复刻 Pi 面板 uikit.go 的 drawLoading
  *   标题栏 + 说明文字(y=22) + 轨道(y=44..49) + 26px 光条每帧右移 5px
  *   Pi 上 120fps 约 0.26s 一圈；这里 30ms 一帧约 0.5s 一圈，观感接近。 */
@@ -1068,7 +1078,14 @@ static void schFocusNow() {
 }
 
 /* 列表行：8:05-9:40 高等数学
- * 128px 里时间要占 63~77px，课名放不下就截断；选中行反白。 */
+ * 128px 里时间要占 63~77px，课名放不下就滚动（见 drawSchRow）。 */
+static uint32_t gSchMqKey  = 0;
+static int      gSchMqOff  = 0;
+static uint32_t gSchMqNext = 0;
+static bool     gSchMqOn   = false;
+
+static void drawSchRow(int y, const char *s, bool sel);   /* 定义在 fitText 之后 */
+
 static void drawSchedule() {
   int  idx[TT_MAX];
   int  day = schShowDay();
@@ -1079,6 +1096,7 @@ static void drawSchedule() {
   drawTitleBar(buf);
 
   if (n == 0) {
+    gSchMqOn = false;                    /* 没课就不需要滚动帧 */
     drawCenter(ROW2, "这天没有课");
     return;
   }
@@ -1097,13 +1115,7 @@ static void drawSchedule() {
       hhmm(t2, sizeof(t2), c->end);
       snprintf(buf, sizeof(buf), "%s-%s %s", t1, t2, c->name);
     }
-    int y = ROW1 + i * 16;
-    if (k == gSchSel) {
-      fillRect(0, y, SCREEN_W - 1, y + 14);
-      drawTextMode(0, y, buf, 1, false);
-    } else {
-      drawText(0, y, buf);
-    }
+    drawSchRow(ROW1 + i * 16, buf, k == gSchSel);
   }
   if (first > 0)     fillRect(124, 2, 127, 5);
   if (first + 3 < n) fillRect(124, 58, 127, 61);
@@ -1236,6 +1248,43 @@ static void fitText(char *dst, size_t dn, const char *src, int maxW) {
   dst[o] = 0;
 }
 
+/* ---------------- 课表列表行 ----------------
+ * 课名一长（"8:05-9:40 高等数学（走班）"）就超出 128px，以前直接被屏幕切掉，
+ * 看不出后面是什么。选中行改成走马灯，其余行截断加省略号。 */
+static bool schMqActive() { return gSchMqOn; }
+
+static void drawSchRow(int y, const char *s, bool sel) {
+  int tw = textWidthScaled(s, 1);
+  uint32_t k = mqKey(s);
+
+  if (!sel) {
+    char cut[64];
+    fitText(cut, sizeof(cut), s, SCREEN_W - 2);
+    drawText(0, y, cut);
+    return;
+  }
+
+  fillRect(0, y, SCREEN_W - 1, y + 14);
+  if (tw <= SCREEN_W - 2) {              /* 放得下：静止反白 */
+    gSchMqOn = false;
+    gSchMqKey = k; gSchMqOff = 0;
+    drawTextMode(0, y, s, 1, false);
+    return;
+  }
+
+  gSchMqOn = true;
+  uint32_t now = millis();
+  if (k != gSchMqKey) {                  /* 换了课（或换了行）就从头滚 */
+    gSchMqKey = k; gSchMqOff = 0; gSchMqNext = now + 1000;
+  }
+  if ((int32_t)(now - gSchMqNext) >= 0) {
+    gSchMqOff += 2;
+    if (gSchMqOff > tw - (SCREEN_W - 2) + 16) { gSchMqOff = 0; gSchMqNext = now + 1000; }
+    else                                      { gSchMqNext = now + 45; }
+  }
+  drawTextMode(-gSchMqOff, y, s, 1, false);
+}
+
 /* 书目选中行的走马灯状态 */
 static char     gBkMqText[RD_TITLE_MAX] = {0};
 static int      gBkMqOff = 0;
@@ -1305,7 +1354,9 @@ static int      gTocMqOff = 0;
 static uint32_t gTocMqNext = 0;
 
 static void drawToc() {
-  drawTitleBar("目录");
+  char pct[8];
+  snprintf(pct, sizeof(pct), "%d%%", rdPercent());
+  drawTitleBarRight("目录", pct);
   int n = rdTocCount();
   if (n == 0) {
     drawCenter(ROW2, "这本书没有目录");
@@ -1482,8 +1533,9 @@ static void handleKeys() {
 
   /* ---- 菜单 ---- */
   if (gScr == SCR_MENU) {
-    if (zeroS && gMenuSel > 0) gMenuSel--;
-    if (oneS  && gMenuSel < MENU_COUNT - 1) gMenuSel++;
+    /* 0/1 上下翻，长按连发（repeat 事件每帧一次），到顶/到底循环 */
+    if (zeroS || zeroR) gMenuSel = (gMenuSel + MENU_COUNT - 1) % MENU_COUNT;
+    if (oneS  || oneR)  gMenuSel = (gMenuSel + 1) % MENU_COUNT;
     if (hashS) enterApp(gMenuSel);
     if (starS) goHome();
     return;
@@ -1882,6 +1934,7 @@ void loop() {
                   || !gPrevValid || ctxChanged || flashing;
     }
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
+    if (gScr == SCR_APP && gApp == APP_SCHEDULE && schMqActive()) interval = 60;  /* 课名滚动 */
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
     if (wantFrame && now - lastDraw >= interval) {
       lastDraw = now;
