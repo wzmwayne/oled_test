@@ -205,6 +205,11 @@ static bool i2cWrite(uint8_t addr, uint8_t ctrl, const uint8_t *d, size_t n) {
   return ok;
 }
 static void oledCmd(uint8_t c) { i2cWrite(gOledAddr, 0x00, &c, 1); }
+
+/* 一条 I2C 事务里连续发若干命令字节（SSD1306 的 Co=0 命令可以这样串）。
+ * 以前每个命令字节各走一次 beginTransmission/endTransmission，
+ * 光设置页/列窗口就要 6 次事务，开销比数据本身还大。 */
+static void oledCmdSeq(const uint8_t *c, size_t n) { i2cWrite(gOledAddr, 0x00, c, n); }
 static void clearBuf() { memset(gBuf, 0, sizeof(gBuf)); }
 
 static void setPixel(int x, int y, bool on) {
@@ -222,8 +227,8 @@ static void drawRect(int x0, int y0, int x1, int y1) {
 }
 
 static void flush() {                       /* 全屏，用于初始化/清屏 */
-  oledCmd(0x21); oledCmd(0x00); oledCmd(0x7F);
-  oledCmd(0x22); oledCmd(0x00); oledCmd(0x07);
+  static const uint8_t win[6] = { 0x21, 0x00, 0x7F, 0x22, 0x00, 0x07 };
+  oledCmdSeq(win, sizeof(win));
   i2cWrite(gOledAddr, 0x40, gBuf, sizeof(gBuf));
 }
 
@@ -255,10 +260,23 @@ static void flushDiff() {
   }
   if (pMax < 0) return;                    /* 画面没变，什么都不发 */
   int len = xMax - xMin + 1;
-  for (int p = pMin; p <= pMax; p++) {
-    oledCmd(0x22); oledCmd((uint8_t)p); oledCmd((uint8_t)p);
-    oledCmd(0x21); oledCmd((uint8_t)xMin); oledCmd((uint8_t)xMax);
-    i2cWrite(gOledAddr, 0x40, &gBuf[p * SCREEN_W + xMin], len);
+
+  if (len == SCREEN_W) {
+    /* 整行宽：把页范围一次设成 pMin..pMax，横向寻址模式会自己从本页末尾
+     * 跳到下一页开头，而 gBuf 正好是页优先连续排列 —— 一条命令 + 一次数据流发完。 */
+    uint8_t win[6] = { 0x22, (uint8_t)pMin, (uint8_t)pMax,
+                       0x21, 0x00, (uint8_t)(SCREEN_W - 1) };
+    oledCmdSeq(win, sizeof(win));
+    i2cWrite(gOledAddr, 0x40, &gBuf[pMin * SCREEN_W], (size_t)SCREEN_W * (pMax - pMin + 1));
+  } else {
+    /* 只改了一窄条：每页单独定位（页/列窗口在一条事务里发完），
+     * 免得把整页 128 字节都重发一遍。 */
+    for (int p = pMin; p <= pMax; p++) {
+      uint8_t w[6] = { 0x22, (uint8_t)p, (uint8_t)p,
+                       0x21, (uint8_t)xMin, (uint8_t)xMax };
+      oledCmdSeq(w, sizeof(w));
+      i2cWrite(gOledAddr, 0x40, &gBuf[p * SCREEN_W + xMin], len);
+    }
   }
   memcpy(gPrevBuf, gBuf, sizeof(gBuf));
 }
@@ -431,8 +449,8 @@ static int regToBright(int reg) {
 }
 
 static void contrastApply() {
-  oledCmd(0x81);
-  oledCmd(brightToReg(gBright));
+  uint8_t seq[2] = { 0x81, brightToReg(gBright) };   /* 0x81 后面必须紧跟亮度值 */
+  oledCmdSeq(seq, sizeof(seq));
 }
 
 static void contrastLoad() {
@@ -743,10 +761,25 @@ static bool keyLockPoll() {
 }
 
 /* ---------------- 息屏 ---------------- */
+/* 定义在下面的导航段，这里先用 */
+static void goHome();
+static bool appHidden(int id);
+
 static void screenOff() {
   if (gScreenOff) return;
   gScreenOff = true;
-  clearBuf(); flush();
+
+  /* 隐藏应用息屏即退出：唤醒后回到主页，别人碰这台机器不会直接看到
+   * 阅读器还开着（也免得"上次应用"绕回去）。普通应用不这么做——
+   * 它们本来就能从菜单进，退出反而丢上下文。 */
+  if (appHidden(gApp)) {
+    goHome();
+    logf("[屏] 隐藏应用随息屏退出\r\n");
+  }
+
+  /* 0xAE 直接把像素全关，不需要再往 GDDRAM 写 1024 字节空白；
+   * 唤醒时 screenWake() 会置 gPrevValid=false，整屏重画一遍。 */
+  clearBuf();
   oledCmd(0xAE);
   logf("[屏] 息屏\r\n");
 }
@@ -832,10 +865,12 @@ static void durText(char *buf, size_t n, int min) {
   else               snprintf(buf, n, "%d小时%d分", min / 60, min % 60);
 }
 
-/* 主页第 4 行：正在上的课 → 下节课 → 已放学 → 今日无课 */
-/* 主页第 4 行：固定句式，一眼看完当前状态。
- *   上课：正在上 X，还剩 A，下节 Y，B 后放学
- *   下课：下节 X，还有 A，下下节 Y，B 后放学
+/* 主页第 4 行：固定句式，一眼看完当前状态。不加「上课：/下课：」前缀——
+ * 时态已经由「正在上 / 还剩」和「下节 / 还有」表达清楚，前缀白占 3 个字。
+ *   正在上 X，还剩 A，下节 Y
+ *   下节 X，还有 A，下下节 Y
+ *   今天的课都上完了
+ * 后面那句（下节 / 下下节）没有对应课程时整段省掉，不显示「无」。
  * 名词用课名，时间统一成人话（"45分" / "1小时20分"）。 */
 static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
@@ -861,19 +896,23 @@ static void drawHomeSchedule() {
       else if (nn < 0) { nn = idx[i]; break; }
     }
   }
-  const char *nxN = (nx >= 0 && ttGet(nx)) ? ttGet(nx)->name : "无";
-  const char *nnN = (nn >= 0 && ttGet(nn)) ? ttGet(nn)->name : "无";
+  const char *nxN = (nx >= 0 && ttGet(nx)) ? ttGet(nx)->name : nullptr;
+  const char *nnN = (nn >= 0 && ttGet(nn)) ? ttGet(nn)->name : nullptr;
 
   if (cur >= 0) {
     const TtCourse *c = ttGet(cur);
     durText(d1, sizeof(d1), (int)c->end - nowMin);
-    snprintf(line, sizeof(line), "上课：正在上 %s，还剩 %s，下节 %s",
-             c->name, d1, nxN);
-  } else if (nx >= 0) {
+    if (nxN)
+      snprintf(line, sizeof(line), "正在上 %s，还剩 %s，下节 %s", c->name, d1, nxN);
+    else
+      snprintf(line, sizeof(line), "正在上 %s，还剩 %s", c->name, d1);
+  } else if (nxN) {
     const TtCourse *c = ttGet(nx);
     durText(d1, sizeof(d1), (int)c->start - nowMin);
-    snprintf(line, sizeof(line), "下课：下节 %s，还有 %s，下下节 %s",
-             nxN, d1, nnN);
+    if (nnN)
+      snprintf(line, sizeof(line), "下节 %s，还有 %s，下下节 %s", nxN, d1, nnN);
+    else
+      snprintf(line, sizeof(line), "下节 %s，还有 %s", nxN, d1);
   } else {
     snprintf(line, sizeof(line), "今天的课都上完了");
   }
