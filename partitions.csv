@@ -1,13 +1,13 @@
-# 4MB flash 分区（app0 1MB / font 256KB / 书库 2.62MB）
-#   app0   1MB    —— 当前固件约 750KB，留 300KB 余量
-#   font   256KB  —— 符号 + GB2312 + 语料高频字，7211 字形共 225KB
-#   spiffs 2.62MB —— 书库（/books）+ 课表（/tt.json）
+# 4MB flash 分区（app0 1.56MB / font 448KB / 书库 1.87MB）
+#   app0   1.5625MB —— 当前固件 ~750KB，给 WiFi（约 780KB）留出位置
+#   font   448KB    —— FNT2 分层压缩：常用字原样 + 其余 deflate，全 CJK 21419 字共 441KB
+#   spiffs 1.87MB   —— 书库（/books）+ 课表（/tt.json）
 # 改这张表必须刷整包（0x0），否则分区对不上会 mount 失败
 # name,     type, subtype,  offset,     size
 nvs,        data, nvs,      0x9000,     0x5000
 otadata,    data, ota,      0xe000,     0x2000
-app0,       app,  ota_0,    0x10000,    0x100000
-font,       data, 0x40,     0x110000,   0x40000
-spiffs,     data, spiffs,   0x150000,   0x29F000
+app0,       app,  ota_0,    0x10000,    0x190000
+font,       data, 0x40,     0x1A0000,   0x70000
+spiffs,     data, spiffs,   0x210000,   0x1DF000
 phy,        data, phy,      0x3EF000,   0x1000
 coredump,   data, coredump, 0x3F0000,   0x10000

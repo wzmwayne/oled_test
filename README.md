@@ -241,41 +241,47 @@ WiFi.setTxPower(WIFI_POWER_8_5dBm);    // = 34，单位 0.25dBm
 |---|---|---|---|
 | nvs | 0x009000 | 20 KB | 配置、进度、课程缓存 |
 | otadata | 0x00E000 | 8 KB | |
-| app0 | 0x010000 | **1 MB** | 固件（约 740 KB，71%；RAM 21%） |
-| font | 0x110000 | **256 KB** | 字库点阵（mmap，实际 225 KB） |
-| spiffs | 0x150000 | **2.62 MB** | LittleFS：`/books`、`/tt.json` |
+| app0 | 0x010000 | **1.56 MB** | 固件约 750 KB，剩下 780 KB 留给将来的 WiFi |
+| font | 0x1A0000 | **448 KB** | 字库（mmap，实际 441 KB，全 CJK 21419 字） |
+| spiffs | 0x210000 | **1.87 MB** | LittleFS：`/books`、`/tt.json` |
 | phy | 0x3EF000 | 4 KB | RF 校准 |
 | coredump | 0x3F0000 | 64 KB | 崩溃现场 |
 
-字库从 704KB 收到 256KB，省下的 448KB 全给了书库（2.18 → 2.62MB）。
-改这张表必须刷整包（`0x0`），旧的分区布局下书库会挂载失败。
+app0 之所以给到 1.56 MB：WiFi 栈实测约 780 KB，加上现有固件正好 1.55 MB。
+启用 WiFi 后书库仍是 1.87 MB（不会被挤压），因为分区在刷机时就定死了。
+改这张表必须刷整包（`0x0`），旧布局下书库会挂载失败。
 
 ## 字库
 
-`font.bin` 放 font 分区，固件里只有声明（`src/font_wqy14.h`）。共 **7211 个字形**，
-每个 32 字节（16×16，不描边），合计 230752 字节 ≈ 225 KB：
+`font.bin` 放 font 分区，固件里只有声明（`src/font_wqy14.h`）。**全 CJK 21419 个字**，
+容器是 `FNT2` 分层压缩，合计 **452007 字节 ≈ 441 KB**（原样存要 669 KB）：
 
-- ASCII + Latin-1 补充（U+00A0–U+00FF）
-- 通用标点（U+2000–U+2070）、CJK 标点（U+3000–U+3040）、全角形式（U+FF01–U+FF66）
-- **GB2312 一级 + 二级汉字（6763 个）**
-- 语料统计出的高频字（与前一项取并集），见下面的 `tools/freq_chars.py`
+| 层 | 内容 | 存储 |
+|---|---|---|
+| tier A | 常用字 3000 个（按公共字频表取） | 原样 32 B/字，二分直接取，不解压 |
+| tier B | 其余 18419 个 | 按码位分 72 块、每块 256 字独立 deflate |
 
-不再收录 U+4E00–U+9FFF 全量：那样要 685 KB，占掉整个书库的空间。
-代价是生僻字（人名、古籍用字）会显示成空心方框——正文常用字覆盖 99.9%，
-固件自己的界面文案 100% 覆盖（生成时会对照源码核对）。
+覆盖：ASCII + Latin-1、通用标点、CJK 标点、全角、**U+4E00–U+9FFF 全量 + GB2312**。
+不再有生僻字方块。分层只影响读取方式，不影响画出来的样子（与旧字库逐字节一致）。
+
+查一个 tier B 的字：先按每块首码位二分定位，把那一块解压到 8 KB RAM 里再线性扫；
+tier A 3000 个已覆盖 99.18% 的正文，正常阅读基本走不到解压路径。
+
+分层顺序来自 `tools/freq_zh.txt`（Jun Da《现代汉语单字频率列表》，公共语料统计，
+[来源](https://lingua.mtsu.edu/chinese-computing/statistics/char/list.php)），
+不是从某本书里统计的。
 
 重新生成（生成完要刷整包）：
 
 ```bash
-python3 tools/freq_chars.py 语料.txt -o freq.txt   # 统计字频（也吃 .ezzbk）
-python3 tools/genfont_c.py --freq freq.txt --top 6000   # 符号 + GB2312 + 高频字
-python3 tools/genfont_c.py              # 只有符号 + GB2312
-python3 tools/genfont_c.py --full       # 恢复全 CJK（需要 704KB 分区）
+python3 tools/genfont_c.py --full                  # 全 CJK（默认 tier A=3000）
+python3 tools/genfont_c.py --full --tier-a 4000    # 常用字多留一些，体积略增
+python3 tools/genfont_c.py                         # 只做 GB2312 + 符号（约 225 KB）
 python3 tools/genfont_c.py --chars "测试屏幕"
 ```
 
-未收录的字符按 8px 空心方框前进。固件启动时会核对字库首尾字形号，
-不匹配就关掉字库（不出字）并写日志，不会画出满屏白块。
+固件启动时校验 `FNT2` 头、层数与各段长度；不匹配就关掉字库（不出字）并写日志，
+不会再把 0xFFFF 当字宽画出满屏白块。
 
 ## 故障判读
 

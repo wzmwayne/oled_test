@@ -13,13 +13,14 @@
  *      短按 *  : 由各页面自己定义；主页短按 * = 息屏
  *      息屏    : 长按 0 或 1 唤醒；30 秒无操作自动息屏
  *
- *  分区（见 partitions.csv）: app0 1MB @0x10000 / font 704KB @0x110000
- *                           spiffs 2.18MB @0x1C0000（书库在 /books）
+ *  分区（见 partitions.csv）: app0 1.56MB @0x10000（给 WiFi 留位）
+ *                           font 448KB @0x1A0000 / spiffs 1.87MB @0x210000
  * ============================================================
  */
 
 #include <Wire.h>
 #include <LittleFS.h>
+#include "miniz.h"          /* ROM 里的 tinfl，用来解 tierB 字库块 */
 #include <stdarg.h>
 #include <esp_partition.h>
 #include "src/font_wqy14.h"
@@ -295,11 +296,51 @@ static bool oledInit() {
 }
 
 /* ==================== 字库渲染 ====================
- * 字库不再编进固件，而是烧在独立的 font 分区（128KB），
- * 启动时 mmap 到地址空间，之后访问和普通 const 数组一样快。
+ * 字库烧在独立的 font 分区，启动时 mmap。容器是 FNT2 分层压缩：
+ *   tierA: 常用字（默认 3000，按公共字频表选）原样 32B/字，二分直接取；
+ *   tierB: 其余 1.8 万字按码位分块（256 字/块）独立 deflate，
+ *          查的时候解压那一块到 RAM 再线性扫，块内 8KB。
+ * 这样既有全 CJK 覆盖，又比原样存省下 230KB 给书库。
  */
-const wqy14_glyph_t *gWqy14 = nullptr;
+static const wqy14_hdr_t   *gFontHdr  = nullptr;
+static const wqy14_glyph_t *gTierA    = nullptr;
+static const wqy14_blk_t   *gBlkIdx   = nullptr;
+static const uint8_t       *gBlkData  = nullptr;
+static bool                 gFontOk   = false;
 static esp_partition_mmap_handle_t gFontMap = 0;
+
+/* 块解码缓冲：按字形结构体对齐，tinfl 直接往里写 */
+static wqy14_glyph_t gBlkGlyphs[WQY14_BLOCK_GLYPHS];
+static int           gBlkCur = -1;
+static tinfl_decompressor *gFontTinf = nullptr;
+
+/* 解压第 b 块到 gBlkGlyphs（失败返回 false） */
+static bool fontLoadBlock(int b) {
+  if (b == gBlkCur) return true;
+  if (!gFontHdr || b < 0 || b >= gFontHdr->block_count) return false;
+  if (!gFontTinf) {
+    gFontTinf = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor));
+    if (!gFontTinf) { logf("[字库] tinfl 状态分配失败\r\n"); return false; }
+  }
+  const wqy14_blk_t *e = &gBlkIdx[b];
+  uint32_t off = e->rel_off;
+  uint32_t end = (b + 1 < gFontHdr->block_count) ? gBlkIdx[b + 1].rel_off
+                                                 : gFontHdr->data_len;
+  if (end <= off || end > gFontHdr->data_len) return false;
+
+  tinfl_init(gFontTinf);
+  size_t inLen = end - off;
+  size_t outLen = sizeof(gBlkGlyphs);
+  tinfl_status st = tinfl_decompress(gFontTinf, gBlkData + off, &inLen,
+                                     (uint8_t *)gBlkGlyphs, (uint8_t *)gBlkGlyphs,
+                                     &outLen, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+  if (st != TINFL_STATUS_DONE || outLen != (size_t)e->count * WQY14_GLYPH_BYTES) {
+    gBlkCur = -1;
+    return false;
+  }
+  gBlkCur = b;
+  return true;
+}
 
 static bool fontMount() {
   const esp_partition_t *p = esp_partition_find_first(
@@ -315,79 +356,69 @@ static bool fontMount() {
     logf("[字库] mmap 失败 err=%d\r\n", (int)err);
     return false;
   }
-  gWqy14 = (const wqy14_glyph_t *)ptr;
 
-  /* 简单完整性检查：首字形必须是空格 0x20，末字形必须有序 */
-  uint16_t first = gWqy14[0].rune;
-  uint16_t last  = gWqy14[WQY14_COUNT - 1].rune;
-  /* 分区被擦除（全 0xFF）时 first 会是 0xFFFF；此时若继续用这块内存，
-   * 每笔画出来都是 16px 实心白块。校验不过就干脆放弃字库，宁可空白。 */
-  bool ok = (first == 0x0020) && (last > first) && (last <= 0xFF65 + 0x100);
+  const wqy14_hdr_t *h = (const wqy14_hdr_t *)ptr;
+  const uint8_t *base = (const uint8_t *)ptr;
+  /* 头校验 + 各段越界检查：分区被擦成全 0xFF 或整包写错偏移时，
+   * 绝不能让 0xFFFF 的字宽进渲染（以前就是那样画出满屏白块）。 */
+  bool ok = (p->size > sizeof(wqy14_hdr_t))
+            && !memcmp(h->magic, "FNT2", 4)
+            && h->ver == 2
+            && h->tier_a_count == WQY14_TIER_A
+            && h->total_count == WQY14_COUNT
+            && h->block_glyphs == WQY14_BLOCK_GLYPHS
+            && (uint32_t)h->tier_a_off + (uint32_t)h->tier_a_count * WQY14_GLYPH_BYTES <= p->size
+            && (uint32_t)h->block_idx_off + (uint32_t)h->block_count * sizeof(wqy14_blk_t) <= p->size
+            && (uint32_t)h->data_off + h->data_len <= p->size;
+
   if (!ok) {
-    gWqy14 = nullptr;
-    logf("[字库] 分区内容与固件不匹配（首字形 0x%04X，末字形 0x%04X）\r\n", first, last);
+    logf("[字库] 分区内容与固件不匹配（magic=%02X%02X%02X%02X ver=%u tierA=%u/%u total=%u/%u）\r\n",
+         h->magic[0], h->magic[1], h->magic[2], h->magic[3], h->ver,
+         h->tier_a_count, WQY14_TIER_A, h->total_count, WQY14_COUNT);
     logf("[字库] 很可能是整包把 font.bin 写到了旧偏移，请重刷 full 镜像\r\n");
+    gFontOk = false;
+    return false;
   }
-  logf("[字库] mmap %u KB @0x%06X, %d 字形 0x%04X..0x%04X %s\r\n",
+
+  gFontHdr  = h;
+  gTierA    = (const wqy14_glyph_t *)(base + h->tier_a_off);
+  gBlkIdx   = (const wqy14_blk_t *)(base + h->block_idx_off);
+  gBlkData  = base + h->data_off;
+  gBlkCur   = -1;
+  gFontOk   = true;
+
+  logf("[字库] mmap %u KB @0x%06X, tierA %u + tierB %u = %u 字形, %u 块 %u KB\r\n",
        (unsigned)(p->size / 1024), (unsigned)p->address,
-       WQY14_COUNT, first, last, ok ? "OK" : "内容异常");
-  return ok;
+       h->tier_a_count, h->tier_b_count, h->total_count,
+       h->block_count, (unsigned)(h->data_len / 1024));
+  return true;
 }
 
 static const wqy14_glyph_t *findGlyph(uint32_t cp) {
-  if (!gWqy14) return nullptr;
-  int lo = 0, hi = WQY14_COUNT - 1;
+  if (!gFontOk || cp > 0xFFFF) return nullptr;
+
+  /* tierA：常用字原样存，直接二分 */
+  int lo = 0, hi = (int)gFontHdr->tier_a_count - 1;
   while (lo <= hi) {
     int mid = (lo + hi) >> 1;
-    uint16_t r = gWqy14[mid].rune;
-    if (r == cp) return &gWqy14[mid];
+    uint16_t r = gTierA[mid].rune;
+    if (r == cp) return &gTierA[mid];
     if (r < cp) lo = mid + 1; else hi = mid - 1;
   }
+
+  /* tierB：先按每块首码位二分，再解压该块线性扫 */
+  lo = 0; hi = (int)gFontHdr->block_count - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) >> 1;
+    const wqy14_blk_t *e = &gBlkIdx[mid];
+    if (cp < e->first_rune) { hi = mid - 1; continue; }
+    if (cp >= (uint32_t)e->first_rune + e->count) { lo = mid + 1; continue; }
+    if (!fontLoadBlock(mid)) return nullptr;
+    for (int k = 0; k < (int)e->count; k++)
+      if (gBlkGlyphs[k].rune == cp) return &gBlkGlyphs[k];
+    return nullptr;
+  }
   return nullptr;
-}
-
-/* 供 reader.cpp 排版用：拿不到字形就按 8px 算 */
-int appCpWidth(uint32_t cp) {
-  const wqy14_glyph_t *g = findGlyph(cp);
-  return g ? g->w : 8;
-}
-
-static uint32_t utf8Next(const char *&s) {
-  uint8_t c = (uint8_t)*s++;
-  if (c < 0x80) return c;
-  uint32_t cp; int n;
-  if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; n = 1; }
-  else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 2; }
-  else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 3; }
-  else return '?';
-  while (n-- > 0) {
-    if ((*s & 0xC0) != 0x80) return '?';
-    cp = (cp << 6) | ((uint8_t)*s++ & 0x3F);
-  }
-  return cp;
-}
-
-static int drawTextMode(int x, int y, const char *s, uint8_t scale, bool mode) {
-  int cx = x;
-  const char *p = s;
-  while (*p) {
-    uint32_t cp = utf8Next(p);
-    const wqy14_glyph_t *g = findGlyph(cp);
-    if (!g) { cx += 8 * scale; continue; }
-    for (int row = 0; row < WQY14_HEIGHT; row++) {
-      uint16_t bits = g->rows[row];
-      if (!bits) continue;
-      for (int col = 0; col < g->w && col < 16; col++) {
-        if (!(bits & (1u << col))) continue;
-        if (scale == 1) setPixel(cx + col, y + row, mode);
-        else for (int dy = 0; dy < scale; dy++)
-               for (int dx = 0; dx < scale; dx++)
-                 setPixel(cx + col * scale + dx, y + row * scale + dy, mode);
-      }
-    }
-    cx += g->w * scale;
-  }
-  return cx;
 }
 
 static int textWidthScaled(const char *s, uint8_t scale) {
@@ -1576,7 +1607,7 @@ static void printInfo() {
   logf("唤醒锁  : 0x%02X (%s%s)\r\n", (unsigned)gWakeLocks,
        (gWakeLocks & WL_STOPWATCH) ? "正计时 " : "",
        (gWakeLocks & WL_TIMER) ? "倒计时" : "");
-  logf("字库    : %s\r\n", gWqy14 ? "已 mmap" : "未加载");
+  logf("字库    : %s\r\n", gFontOk ? "已 mmap" : "未加载");
   logf("课表    : %d 条，本周%s\r\n", ttCount(), ttIsOddWeek() ? "单周" : "双周");
   logf("循环    : 最坏 %u ms\r\n", (unsigned)gLoopMaxMs);
   logf("自由堆  : %u B\r\n", (unsigned)ESP.getFreeHeap());

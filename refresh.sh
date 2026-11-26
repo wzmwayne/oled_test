@@ -35,7 +35,7 @@ echo "==> 合并字库进完整镜像"
     0x8000   "$BUILD/oled_test.ino.partitions.bin" \
     0xe000   "$BUILD/boot_app0.bin" \
     0x10000  "$BUILD/oled_test.ino.bin" \
-    0x110000 "$SKETCH/font.bin" >/dev/null
+    0x1A0000 "$SKETCH/font.bin" >/dev/null
 
 mkdir -p "$DEST"
 cp -f "$BUILD/oled-full-font.bin" "$DEST/oled-full.bin"
