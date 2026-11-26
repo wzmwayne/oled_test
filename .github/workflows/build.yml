@@ -73,7 +73,7 @@ jobs:
         run: |
           ccache -z
           arduino-cli compile -j "$(nproc)" --build-path .build \
-            --build-property "upload.maximum_size=1048576" \
+            --build-property "upload.maximum_size=1638400" \
             --build-property "compiler.cache_cmd=ccache" \
             --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc" .
           ccache -s

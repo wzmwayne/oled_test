@@ -241,7 +241,7 @@ WiFi.setTxPower(WIFI_POWER_8_5dBm);    // = 34，单位 0.25dBm
 |---|---|---|---|
 | nvs | 0x009000 | 20 KB | 配置、进度、课程缓存 |
 | otadata | 0x00E000 | 8 KB | |
-| app0 | 0x010000 | **1.56 MB** | 固件约 750 KB，剩下 780 KB 留给将来的 WiFi |
+| app0 | 0x010000 | **1.56 MB** | 固件约 750 KB（RAM 23%），剩下 780 KB 留给将来的 WiFi |
 | font | 0x1A0000 | **448 KB** | 字库（mmap，实际 441 KB，全 CJK 21419 字） |
 | spiffs | 0x210000 | **1.87 MB** | LittleFS：`/books`、`/tt.json` |
 | phy | 0x3EF000 | 4 KB | RF 校准 |

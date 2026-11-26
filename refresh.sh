@@ -10,7 +10,7 @@ DEST="/sdcard/Download/oled_test/bin"
 ESTOOL="$HOME/.arduino15/packages/esp32/tools/esptool_py/5.3.0-cn/esptool"
 export PATH="$HOME/bin:$PATH"
 
-MAXSIZE=1048576          # 自定义分区表 app0 = 1MB（写大了会盖掉 font 分区）
+MAXSIZE=1638400          # 自定义分区表 app0 = 1.5625MB（写大了会盖掉 font 分区）
 CACHE=ccache             # platform.txt 已插入 {compiler.cache_cmd} 占位符
 
 echo "==> 编译"
