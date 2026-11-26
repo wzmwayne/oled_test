@@ -707,6 +707,9 @@ enum AppId {
 };
 #define MENU_COUNT 5          /* 菜单只列前 5 项 */
 #define ID_MAX_BITS 16        /* 普通编号最多 8 位；隐藏编号 = 8 位前缀 + 编号 */
+/* 编号输入失败的统一提示：不区分"没这个应用"和"这个编号被隐藏了"，
+ * 否则错误文案本身就泄露了哪些编号是隐藏应用。 */
+#define ID_ERR_TEXT    "e:app_not_found"
 #define HID_PREFIX     "10010011"
 #define HID_PREFIX_LEN 8      /* 8 位 @2x 正好占满 128px 屏宽 */
 enum Screen { SCR_APP, SCR_MENU, SCR_ID };
@@ -1285,8 +1288,8 @@ static void drawSchRow(int y, const char *s, bool sel) {
   drawTextMode(-gSchMqOff, y, s, 1, false);
 }
 
-/* 书目选中行的走马灯状态 */
-static char     gBkMqText[RD_TITLE_MAX] = {0};
+/* 书目选中行的走马灯状态（只存指纹，书名多长都不怕） */
+static uint32_t gBkMqKey = 0;
 static int      gBkMqOff = 0;
 static uint32_t gBkMqNext = 0;
 
@@ -1305,41 +1308,37 @@ static void drawBookList() {
   for (int i = 0; i < 3; i++) {
     int k = first + i;
     if (k >= n) break;
-    char pct[8], buf[48];
+    char pct[8], buf[RD_TITLE_MAX + 8];
     const char *title = rdBookTitle(k);       /* 优先用 ezzbk 元数据里的书名 */
     snprintf(pct, sizeof(pct), "%d%%", rdBookPercent(k));
     int pw = textWidthScaled(pct, 1);
     int y = ROW1 + i * 16;
+    int avail = SCREEN_W - pw - 6;            /* 右边这一段永久留给百分比 */
 
     if (k == gRdSel) {
       int tw = textWidthScaled(title, 1);
-      int x = 2;
-      if (tw > SCREEN_W - 4) {
-        /* 选中行放不下：静止 1 秒后横向滚动，滚动时让出整行、不画百分比 */
+      uint32_t kk = mqKey(title);
+      fillRect(0, y, SCREEN_W - 1, y + 14);
+      if (tw <= avail) {
+        gBkMqKey = kk; gBkMqOff = 0;
+        fitText(buf, sizeof(buf), title, avail);
+        drawTextMode(2, y, buf, 1, false);
+      } else {
+        /* 放不下：只在左侧 avail 宽度里滚，百分比固定不动 */
         uint32_t now = millis();
-        if (strcmp(gBkMqText, title) != 0) {
-          snprintf(gBkMqText, sizeof(gBkMqText), "%s", title);
-          gBkMqOff = 0;
-          gBkMqNext = now + 1000;
-        }
+        if (kk != gBkMqKey) { gBkMqKey = kk; gBkMqOff = 0; gBkMqNext = now + 1000; }
         if ((int32_t)(now - gBkMqNext) >= 0) {
           gBkMqOff += 2;
-          if (gBkMqOff > tw - (SCREEN_W - 4) + 16) { gBkMqOff = 0; gBkMqNext = now + 1000; }
-          else                                      { gBkMqNext = now + 45; }
+          if (gBkMqOff > tw - avail + 16) { gBkMqOff = 0; gBkMqNext = now + 1000; }
+          else                            { gBkMqNext = now + 45; }
         }
-        x = 2 - gBkMqOff;
-        fillRect(0, y, SCREEN_W - 1, y + 14);
-        drawTextMode(x, y, title, 1, false);
-      } else {
-        snprintf(gBkMqText, sizeof(gBkMqText), "%s", title);
-        gBkMqOff = 0;
-        fitText(buf, sizeof(buf), title, SCREEN_W - pw - 6);
-        fillRect(0, y, SCREEN_W - 1, y + 14);
-        drawTextMode(2, y, buf, 1, false);
-        drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
+        drawTextMode(2 - gBkMqOff, y, title, 1, false);
+        /* 把滚到百分比底下的字擦掉，保证百分比始终看得见 */
+        fillRect(SCREEN_W - pw - 4, y, SCREEN_W - 1, y + 14);
       }
+      drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
     } else {
-      fitText(buf, sizeof(buf), title, SCREEN_W - pw - 6);
+      fitText(buf, sizeof(buf), title, avail);
       drawText(2, y, buf);
       drawText(SCREEN_W - pw - 2, y, pct);
     }
@@ -1349,7 +1348,7 @@ static void drawBookList() {
 }
 
 /* 目录选中行的走马灯状态 */
-static char     gTocMqText[RD_TOC_NAME] = {0};
+static uint32_t gTocMqKey = 0;
 static int      gTocMqOff = 0;
 static uint32_t gTocMqNext = 0;
 
@@ -1376,13 +1375,10 @@ static void drawToc() {
       /* 选中行（焦点）：放不下就静止 1 秒再横向滚，滚完停 1 秒重来 */
       int tw = textWidthScaled(full, 1);
       int x = 2;
+      uint32_t kk = mqKey(full);
       if (tw > SCREEN_W - 4) {
         uint32_t now = millis();
-        if (strcmp(gTocMqText, full) != 0) {
-          snprintf(gTocMqText, sizeof(gTocMqText), "%s", full);
-          gTocMqOff = 0;
-          gTocMqNext = now + 1000;
-        }
+        if (kk != gTocMqKey) { gTocMqKey = kk; gTocMqOff = 0; gTocMqNext = now + 1000; }
         if ((int32_t)(now - gTocMqNext) >= 0) {
           gTocMqOff += 2;
           if (gTocMqOff > tw - (SCREEN_W - 4) + 16) { gTocMqOff = 0; gTocMqNext = now + 1000; }
@@ -1390,7 +1386,7 @@ static void drawToc() {
         }
         x = 2 - gTocMqOff;
       } else {
-        snprintf(gTocMqText, sizeof(gTocMqText), "%s", full);
+        gTocMqKey = kk;
         gTocMqOff = 0;
       }
       fillRect(0, y, SCREEN_W - 1, y + 14);
@@ -1555,18 +1551,18 @@ static void handleKeys() {
 
     if (hashS) {
       if (gIdHidden) {
-        if (gIdLen <= HID_PREFIX_LEN) { toast("编号不完整", 1500); return; }
+        if (gIdLen <= HID_PREFIX_LEN) { toast(ID_ERR_TEXT, 1500); return; }
         int id = idToHiddenApp(gIdBuf + HID_PREFIX_LEN, gIdLen - HID_PREFIX_LEN);
         logf("[界面] 隐藏 ID -> %s\r\n", id >= 0 ? APP_NAME[id] : "无效");
         if (id >= 0) enterApp(id);
-        else { gIdHidden = false; goHome(); toast("无效隐藏编号", 1500); }
+        else { gIdHidden = false; goHome(); toast(ID_ERR_TEXT, 1500); }
         return;
       }
       int id = idToApp(gIdBuf, gIdLen);
       logf("[界面] ID=%s (%d 位) -> %s\r\n", gIdLen ? gIdBuf : "(空)", gIdLen,
            id >= 0 ? APP_NAME[id] : "无效");
       if (id >= 0) enterApp(id);
-      else { goHome(); toast("无效编号", 1500); }
+      else { goHome(); toast(ID_ERR_TEXT, 1500); }
       return;
     }
     if (starS) { gIdHidden = false; goHome(); }
