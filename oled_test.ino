@@ -421,6 +421,50 @@ static const wqy14_glyph_t *findGlyph(uint32_t cp) {
   return nullptr;
 }
 
+/* 供 reader.cpp 排版用：拿不到字形就按 8px 算 */
+int appCpWidth(uint32_t cp) {
+  const wqy14_glyph_t *g = findGlyph(cp);
+  return g ? g->w : 8;
+}
+
+static uint32_t utf8Next(const char *&s) {
+  uint8_t c = (uint8_t)*s++;
+  if (c < 0x80) return c;
+  uint32_t cp; int n;
+  if ((c & 0xE0) == 0xC0)      { cp = c & 0x1F; n = 1; }
+  else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 2; }
+  else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 3; }
+  else return '?';
+  while (n-- > 0) {
+    if ((*s & 0xC0) != 0x80) return '?';
+    cp = (cp << 6) | ((uint8_t)*s++ & 0x3F);
+  }
+  return cp;
+}
+
+static int drawTextMode(int x, int y, const char *s, uint8_t scale, bool mode) {
+  int cx = x;
+  const char *p = s;
+  while (*p) {
+    uint32_t cp = utf8Next(p);
+    const wqy14_glyph_t *g = findGlyph(cp);
+    if (!g) { cx += 8 * scale; continue; }
+    for (int row = 0; row < WQY14_HEIGHT; row++) {
+      uint16_t bits = g->rows[row];
+      if (!bits) continue;
+      for (int col = 0; col < g->w && col < 16; col++) {
+        if (!(bits & (1u << col))) continue;
+        if (scale == 1) setPixel(cx + col, y + row, mode);
+        else for (int dy = 0; dy < scale; dy++)
+               for (int dx = 0; dx < scale; dx++)
+                 setPixel(cx + col * scale + dx, y + row * scale + dy, mode);
+      }
+    }
+    cx += g->w * scale;
+  }
+  return cx;
+}
+
 static int textWidthScaled(const char *s, uint8_t scale) {
   int w = 0; const char *p = s;
   while (*p) { const wqy14_glyph_t *g = findGlyph(utf8Next(p)); w += (g ? g->w : 8) * scale; }
