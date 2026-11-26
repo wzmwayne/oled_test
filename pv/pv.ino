@@ -227,6 +227,8 @@ static int textWidth(const char *s, uint8_t scale) {
   while (*s) { const wqy14_glyph_t *g = findGlyph(utf8Next(s)); w += (g ? g->w : 8) * scale; }
   return w;
 }
+static void drawText(int x, int y, const char *s) { drawTextMode(x, y, s, 1, true); }
+
 /* 大标题：2 倍字，屏幕只放得下 4 个汉字 / 8 个 ASCII */
 static void bigText(int y, const char *s) {
   drawTextMode((SCREEN_W - textWidth(s, 2)) / 2, y, s, 2, true);
@@ -243,6 +245,7 @@ static float beatPhase() {
   return f < 0 ? f + 1.0f : f;
 }
 static float beatPulse() { return 1.0f - beatPhase(); }
+static int irand(int n) { return (int)(esp_random() % (uint32_t)(n > 0 ? n : 1)); }
 
 /* ==================== 效果（全部按“小屏可读”重画） ==================== */
 enum Fx {
