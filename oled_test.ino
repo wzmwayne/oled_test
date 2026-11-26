@@ -891,7 +891,7 @@ static void drawHomeSchedule() {
 
   int idx[TT_MAX];
   int n = ttDayList(today, idx, TT_MAX);
-  if (n == 0) { uiRow(ROW3, "今天没课", false, nullptr, true); return; }
+  if (n == 0) { drawCenter(ROW3, "今天没课"); return; }
 
   /* 一次遍历：正在上 / 下节 / 下下节。
    * 事件（start==end）不会"正在上"，只会作为下节/下下节出现。 */
@@ -953,7 +953,9 @@ static void drawHomeSchedule() {
     }
   }
 
-  uiRow(ROW3, line, false, nullptr, true);
+  /* 放得下就居中（短句如"今天没课"），放不下才交给 uiRow 去滚 */
+  if (textWidthScaled(line, 1) <= SCREEN_W) drawCenter(ROW3, line);
+  else                                      uiRow(ROW3, line, false, nullptr, true);
 }
 
 /* ---------------- 各页面绘制 ---------------- */
