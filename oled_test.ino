@@ -307,6 +307,7 @@ static const wqy14_glyph_t *gTierA    = nullptr;
 static const wqy14_blk_t   *gBlkIdx   = nullptr;
 static const uint8_t       *gBlkData  = nullptr;
 static bool                 gFontOk   = false;
+static bool                 gFontLegacy = false;   /* 旧版容器（块表存 count），兼容读 */
 static esp_partition_mmap_handle_t gFontMap = 0;
 
 /* 块解码缓冲：按字形结构体对齐，tinfl 直接往里写 */
@@ -375,7 +376,7 @@ static bool fontMount() {
    * 绝不能让 0xFFFF 的字宽进渲染（以前就是那样画出满屏白块）。 */
   bool ok = (p->size > sizeof(wqy14_hdr_t))
             && !memcmp(h->magic, "FNT2", 4)
-            && h->ver == 2
+            && (h->ver == 3 || h->ver == 2)
             && h->tier_a_count == WQY14_TIER_A
             && h->total_count == WQY14_COUNT
             && h->block_glyphs == WQY14_BLOCK_GLYPHS
@@ -384,13 +385,20 @@ static bool fontMount() {
             && (uint32_t)h->data_off + h->data_len <= p->size;
 
   if (!ok) {
-    logf("[字库] 分区内容与固件不匹配（magic=%02X%02X%02X%02X ver=%u tierA=%u/%u total=%u/%u）\r\n",
+    logf("[字库] 分区内容与固件不匹配（magic=%02X%02X%02X%02X ver=%u 需要 3 tierA=%u/%u total=%u/%u）\r\n",
          h->magic[0], h->magic[1], h->magic[2], h->magic[3], h->ver,
          h->tier_a_count, WQY14_TIER_A, h->total_count, WQY14_COUNT);
-    logf("[字库] 很可能是整包把 font.bin 写到了旧偏移，请重刷 full 镜像\r\n");
+    if (h->ver == 2)
+      logf("[字库] 这是旧版容器（块表存的是 count），必须刷整包换字库，只刷 app 不够\r\n");
+    else
+      logf("[字库] 很可能是整包把 font.bin 写到了旧偏移，请重刷 full 镜像\r\n");
     gFontOk = false;
     return false;
   }
+
+  gFontLegacy = (h->ver == 2);
+  if (gFontLegacy)
+    logf("[字库] 旧版容器（块表存 count），按旧规则兼容读取；部分符号会缺失，请刷整包\r\n");
 
   gFontHdr  = h;
   gTierA    = (const wqy14_glyph_t *)(base + h->tier_a_off);
@@ -425,8 +433,10 @@ static const wqy14_glyph_t *findGlyph(uint32_t cp) {
   while (lo <= hi) {
     int mid = (lo + hi) >> 1;
     const wqy14_blk_t *e = &gBlkIdx[mid];
+    /* ver3: 字段是 last_rune；ver2: 同一位置存的是 count，只能按 first+count 估上界 */
+    uint32_t upper = gFontLegacy ? (uint32_t)e->first_rune + e->last_rune : e->last_rune;
     if (cp < e->first_rune) { hi = mid - 1; continue; }
-    if (cp > e->last_rune)  { lo = mid + 1; continue; }
+    if (cp > upper)         { lo = mid + 1; continue; }
     if (!fontLoadBlock(mid)) return nullptr;
     for (int k = 0; k < gBlkCnt; k++)
       if (gBlkGlyphs[k].rune == cp) return &gBlkGlyphs[k];
@@ -793,7 +803,7 @@ static void tdStopClear() { gTdRun = false; gTdTotal = 0; wakeLockRelease(WL_TIM
 /* ==================== 界面状态 ==================== */
 enum AppId {
   APP_HOME = 0, APP_PRECISE, APP_STOPWATCH, APP_TIMER, APP_SCHEDULE,  /* 菜单可见 */
-  APP_READER, APP_BTCONF,                                            /* 隐藏，靠 ID 进 */
+  APP_READER, APP_BTCONF, APP_SELFTEST,                              /* 隐藏，靠 ID 进 */
   APP_COUNT
 };
 #define MENU_COUNT 5          /* 菜单只列前 5 项 */
@@ -807,7 +817,7 @@ enum Screen { SCR_APP, SCR_MENU, SCR_ID };
 
 static const char *APP_NAME[APP_COUNT] = {
   "主页", "精确时钟", "正计时", "倒计时", "课表",
-  "阅读器", "蓝牙配置"
+  "阅读器", "蓝牙配置", "自检"
 };
 
 static int      gApp = APP_HOME;
@@ -1234,6 +1244,7 @@ static int idToAppRaw(const char *bits, int len) {
     case 3: return APP_TIMER;
     case 4: return APP_READER;
     case 5: return APP_BTCONF;
+    case 6: return APP_SELFTEST;      /* 110 */
     case 7: return APP_SCHEDULE;
     default: return -1;
   }
@@ -1251,6 +1262,108 @@ static int idToApp(const char *bits, int len) {
 static int idToHiddenApp(const char *bits, int len) {
   int id = idToAppRaw(bits, len);
   return (id >= 0 && appHidden(id)) ? id : -1;
+}
+
+/* ---------------- 自检（隐藏应用，编号 110） ----------------
+ * 五页：设备 / 屏幕 / 时钟 / 字库 / 符号。0、1 翻页，* 回主页。
+ * 字库那页会把 FNT2 版本、tier 分布、tierB 解压次数与缺字数都摆出来，
+ * 遇到"某个字不显示"先看这里：缺字=没收录，失败=解压坏了，都没涨=显示问题。 */
+static int gSelfPage = 0;
+#define SELF_PAGES 5
+
+static uint8_t selfRtcStatus() {          /* 0x0F 的 OSF 位：1 表示掉过电 */
+  uint8_t st = 0xFF;
+  return dsReadRaw(0x0F, &st, 1) ? st : 0xFF;
+}
+
+static void selfDevice() {
+  char b[40];
+  snprintf(b, sizeof(b), "%s %uMHz", ESP.getChipModel(), (unsigned)ESP.getCpuFreqMHz());
+  drawText(0, ROW1, b);
+  snprintf(b, sizeof(b), "固件 %uKB 堆 %uKB",
+           (unsigned)(ESP.getSketchSize() / 1024), (unsigned)(ESP.getFreeHeap() / 1024));
+  drawText(0, ROW2, b);
+  snprintf(b, sizeof(b), "I2C错 %u 亮 %d%%", (unsigned)gI2cErr, gBright);
+  drawText(0, ROW3, b);
+}
+
+static void selfScreen() {
+  /* 标题下面画 2x2 棋盘：有断线/坏列一眼能看出来 */
+  for (int y = ROW1; y < ROW3; y++)
+    for (int x = 0; x < SCREEN_W; x++)
+      if (((x >> 2) ^ (y >> 2)) & 1) setPixel(x, y, true);
+  drawRect(0, ROW1, SCREEN_W - 1, ROW3 - 1);
+  drawText(0, ROW3, "棋盘 2x2 看断线");
+}
+
+static void selfClock() {
+  char b[40];
+  if (gNowOk) {
+    snprintf(b, sizeof(b), "%04u-%02u-%02u 周%s", gNow.year, gNow.month, gNow.day,
+             WEEK_CN[weekdayFromDate(gNow.year, gNow.month, gNow.day)]);
+    drawText(0, ROW1, b);
+    snprintf(b, sizeof(b), "%02u:%02u:%02u", gNow.hour, gNow.minute, gNow.second);
+    drawText(0, ROW2, b);
+  } else {
+    drawText(0, ROW1, "RTC 读取失败");
+    drawText(0, ROW2, "--:--:--");
+  }
+  uint8_t st = selfRtcStatus();
+  snprintf(b, sizeof(b), "RTC %s OSF=%d", st == 0xFF ? "??" : "OK", (st & 0x80) ? 1 : 0);
+  drawText(0, ROW3, b);
+}
+
+static void selfFont() {
+  char b[40];
+  if (!gFontOk) {
+    drawText(0, ROW1, "字库未加载");
+    drawText(0, ROW2, "刷整包换 font");
+    return;
+  }
+  snprintf(b, sizeof(b), "FNT2 v%u %s", (unsigned)gFontHdr->ver,
+           gFontLegacy ? "旧版!" : "全CJK");
+  drawText(0, ROW1, b);
+  snprintf(b, sizeof(b), "A%u B%u %u块",
+           (unsigned)gFontHdr->tier_a_count, (unsigned)gFontHdr->tier_b_count,
+           (unsigned)gFontHdr->block_count);
+  drawText(0, ROW2, b);
+  snprintf(b, sizeof(b), "解码%u 失败%u 缺%u",
+           (unsigned)gFontBlkLoads, (unsigned)gFontBlkFail, (unsigned)gFontMiss);
+  drawText(0, ROW3, b);
+}
+
+static const char *SELF_SYMBOLS[] = {
+  "—", "…", "“", "”", "‘", "’", "、", "。",
+  "，", "！", "？", "：", "；", "（", "）", "《",
+  "》", "【", "】", "※", "•", "‰", "±", "×",
+};
+
+static void selfSymbols() {
+  int n = (int)(sizeof(SELF_SYMBOLS) / sizeof(SELF_SYMBOLS[0]));
+  int per = 8;
+  for (int r = 0; r < 3; r++) {
+    for (int c = 0; c < per; c++) {
+      int i = r * per + c;
+      if (i >= n) break;
+      drawText(4 + c * 15, ROW1 + r * 16, SELF_SYMBOLS[i]);
+    }
+  }
+}
+
+static void drawSelfTest() {
+  char title[20];
+  if (gSelfPage < 0) gSelfPage = 0;
+  if (gSelfPage >= SELF_PAGES) gSelfPage = SELF_PAGES - 1;
+  snprintf(title, sizeof(title), "自检 %d/%d", gSelfPage + 1, SELF_PAGES);
+  drawTitleBar(title);
+
+  switch (gSelfPage) {
+    case 0: selfDevice();  break;
+    case 1: selfScreen();  break;
+    case 2: selfClock();   break;
+    case 3: selfFont();    break;
+    default: selfSymbols(); break;
+  }
 }
 
 /* 蓝牙配置页：启动中显示加载动画，就绪后显示 PIN 与状态 */
@@ -1451,6 +1564,7 @@ static void enterApp(int id) {
   logf("[界面] -> %s\r\n", APP_NAME[id]);
   if (id == APP_BTCONF) btBegin();          /* 进页面异步启动蓝牙 */
   if (id == APP_READER) { gRdView = 0; gRdSel = 0; rdScan(); }  /* 先进书目 */
+  if (id == APP_SELFTEST) gSelfPage = 0;
   if (id == APP_SCHEDULE) {                 /* 进课表就落在当前这节上 */
     gSchDay = 0;
     gSchSel = 0;
@@ -1621,6 +1735,13 @@ static void handleKeys() {
         }
         if (starS) { rdSaveProgress(); gRdView = 0; rdScan(); }
       }
+      break;
+
+    case APP_SELFTEST:
+      /* 0/1 翻页，* 回主页（长按 * 是全局回主页） */
+      if (zeroS || zeroR) { gSelfPage = (gSelfPage + SELF_PAGES - 1) % SELF_PAGES; }
+      if (oneS  || oneR)  { gSelfPage = (gSelfPage + 1) % SELF_PAGES; }
+      if (starS) goHome();
       break;
 
     case APP_BTCONF:
@@ -1928,6 +2049,7 @@ void loop() {
           case APP_SCHEDULE:  drawSchedule(); break;
           case APP_READER:    drawReader(); break;
           case APP_BTCONF:    drawBtConf(); break;
+          case APP_SELFTEST:  drawSelfTest(); break;
         }
       }
       drawToast();

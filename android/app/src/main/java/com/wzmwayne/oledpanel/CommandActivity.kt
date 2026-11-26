@@ -597,7 +597,7 @@ class CommandActivity : AppCompatActivity(), BleManager.Listener {
         guard: Int,
         done: (List<Course>, Int, String?) -> Unit
     ) {
-        if (guard > 40) {
+        if (guard > 64) {              /* 每页 4 条；与 CourseSync 一致，够 192 条 */
             done(acc, acc.size, null)
             return
         }

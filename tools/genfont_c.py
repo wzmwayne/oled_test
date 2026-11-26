@@ -199,7 +199,7 @@ def main():
 
     buf = bytearray()
     buf += b"FNT2"
-    buf += struct.pack("<HH", 2, len(tier_a))
+    buf += struct.pack("<HH", 3, len(tier_a))   # ver=3: 块表是 first/last/rel
     buf += struct.pack("<I", tierA_off)
     buf += struct.pack("<HH", block_glyphs, len(idx))
     buf += struct.pack("<I", block_idx_off)
