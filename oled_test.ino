@@ -1349,7 +1349,7 @@ static void drawBookList() {
 }
 
 /* 目录选中行的走马灯状态 */
-static char     gTocMqText[48] = {0};
+static char     gTocMqText[RD_TOC_NAME] = {0};
 static int      gTocMqOff = 0;
 static uint32_t gTocMqNext = 0;
 
@@ -1396,7 +1396,7 @@ static void drawToc() {
       fillRect(0, y, SCREEN_W - 1, y + 14);
       drawTextMode(x, y, full, 1, false);
     } else {
-      char buf[48];
+      char buf[RD_TOC_NAME + 8];
       fitText(buf, sizeof(buf), full, SCREEN_W - 3);
       drawText(2, y, buf);
     }
@@ -1421,9 +1421,9 @@ static void drawReader() {
     fillRect(0, y, SCREEN_W - 1, y + 13);
     drawTextMode(0, y, s, 1, false);
   }
-  int w = SCREEN_W * rdPercent() / 100;
-  if (w < 1) w = 1;
-  hline(0, w - 1, 63);
+  /* 底部那条 1px 进度条去掉了：位置固定、宽度随进度变化，
+   * OLED 长时间停在同一个百分点上会把那条线烧进去。
+   * 进度改由书目列表的百分比和目录页标题右侧的百分比显示。 */
 }
 
 /* toast 覆盖第 4 行 */
@@ -1899,6 +1899,10 @@ void loop() {
     wakeUp(WAKE_TIMER_DONE);
     logf("[计时] 倒计时归零，闪屏提示\r\n");
   }
+
+  /* 大书目录分帧补扫：每轮最多 6ms，扫完自动停 */
+  if (!gScreenOff && gScr == SCR_APP && gApp == APP_READER && rdLoaded() && !rdTocReady())
+    rdTocPump(6);
 
   /* 30 秒无操作自动息屏 */
   /* 持锁时屏幕常亮：计时跑着的时候不该黑屏 */

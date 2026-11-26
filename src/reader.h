@@ -18,6 +18,7 @@
 #define RD_BOOK_MAX   16
 #define RD_NAME_MAX   40
 #define RD_TITLE_MAX  44     /* ezzbk 元数据里的书名，UTF-8 字节 */
+#define RD_TOC_NAME   64     /* 章节名单行显示上限（UTF-8 字节） */
 
 void rdInit();                        /* mount 之后调用：建目录、扫书目、清孤儿进度 */
 void rdScan();                        /* 重新扫描 /books，刷新列表与各书进度 */
@@ -46,5 +47,7 @@ void rdForget(const char *name);      /* 文件被删时清掉它的进度 */
 
 /* ---- 目录（.ezb 里的 # / ## 行）---- */
 int  rdTocCount();
-const char *rdTocName(int i);
+const char *rdTocName(int i);         /* 按需从书里读，返回的是共用缓冲 */
 bool rdGotoToc(int i);                /* 跳到第 i 章开头 */
+void rdTocPump(uint32_t ms);          /* 主循环调：分帧补扫目录（大书用） */
+bool rdTocReady();                    /* 整本目录扫完了吗 */

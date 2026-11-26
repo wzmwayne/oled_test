@@ -19,8 +19,7 @@ extern void appLog(const char *fmt, ...);
 extern int  appCpWidth(uint32_t cp);     /* 主固件：字库里的字宽，缺字 8px */
 
 #define RD_DIR       "/books"
-#define RD_TOC_MAX   96
-#define RD_TOC_NAME  40
+#define RD_TOC_MAX   1024   /* 只存偏移（4B/章），名字按需读，大书也够用 */
 #define EZB_BLOCK    16384   /* 块上限，实际值以文件头为准 */
 #define EZB_HDR_V01  24      /* v0.1 头长：magic|algo|flags|rsv|rawSize|blockSize|blockCount|metaLen */
 #define EZB_META_MAX 4096    /* 元数据区上限，超了按头部损坏处理 */
@@ -57,7 +56,7 @@ static tinfl_decompressor *gTinf = nullptr;   /* 按需 malloc，约 11KB */
 
 /* 目录 */
 static uint32_t gTocOff[RD_TOC_MAX];
-static char     gTocName[RD_TOC_MAX][RD_TOC_NAME];
+static char     gTocNameBuf[RD_TOC_NAME];   /* 最近一次 rdTocName() 的结果 */
 static int      gTocN = 0;
 
 static uint32_t gHist[RD_HIST_MAX];
@@ -308,42 +307,68 @@ static uint32_t layout(uint32_t start) {
 }
 
 /* ==================== 目录 ====================
- * ezbk 的 # 卷 / ## 章在正文里是独立行，扫一遍记下偏移与标题。
- * 96 条以内足够日常阅读；超出的书只看前 96 章。
+ * ezbk 的 # 卷 / ## 章在正文里是独立行。这里只记偏移（每章 4 字节）：
+ * 大书动辄两三千章，把章节名一起驻留 RAM 装不下（旧实现 96 章就截断，
+ * 所以"大书目录不全"）。名字在显示时按需从书里读。
+ *
+ * 扫描分帧进行：开书时先扫前 256KB（马上就有目录），剩下的由
+ * rdTocPump() 在阅读过程中按时间片补齐，不会把界面卡住。
  */
-static void buildToc() {
-  gTocN = 0;
-  uint32_t p = 0;
-  while (p < gSize && gTocN < RD_TOC_MAX) {
+static uint32_t gTocPos  = 0;      /* 增量扫描进度（正文偏移） */
+static bool     gTocDone = false;
+
+static void tocReset() {
+  gTocN    = 0;
+  gTocPos  = 0;
+  gTocDone = (gSize == 0);
+}
+
+/* 扫一段，最多处理 budget 字节正文；返回 true 表示还没扫完。
+ * 每次调用都从行首开始、到行首结束，所以可以随时分段。 */
+static bool tocPump(uint32_t budget) {
+  if (gTocDone) return false;
+
+  uint32_t end = gTocPos + budget;
+  if (end < gTocPos || end > gSize) end = gSize;
+  uint32_t p = gTocPos;
+
+  while (p < end && p < gSize && gTocN < RD_TOC_MAX) {
     if (byteAt(p) == '#') {
       uint32_t q = p, h = 0;
       while (q < gSize && byteAt(q) == '#') { h++; q++; }
       if (h <= 2) {
-        while (q < gSize && byteAt(q) == ' ') q++;
-        int o = 0;
-        while (q < gSize && o < RD_TOC_NAME - 1) {
-          uint8_t c = byteAt(q);
-          if (c == '\n' || c == 0xFF) break;
-          if (c != '\r') gTocName[gTocN][o++] = (char)c;
-          q++;
-        }
-        gTocName[gTocN][o] = 0;
-        if (o > 0) {
-          gTocOff[gTocN] = p;
-          gTocN++;
-        }
+        uint32_t r = q;
+        while (r < gSize && byteAt(r) == ' ') r++;
+        uint8_t c = byteAt(r);
+        if (c != '\n' && c != '\r' && c != 0xFF) gTocOff[gTocN++] = p;
       }
+      p = q;
     }
-    /* 跳到下一行行首 */
+    /* 跳到下一行行首：一定要跨过行尾，保证下次仍从行首继续 */
     while (p < gSize) {
       uint32_t nx = p;
       uint32_t c = cpAt(p, &nx);
-      if (c == 0) break;
+      if (c == 0) { p = gSize; break; }
       p = nx;
       if (c == '\n') break;
     }
   }
+
+  gTocPos = p;
+  if (p >= gSize || gTocN >= RD_TOC_MAX) gTocDone = true;
+  return !gTocDone;
 }
+
+/* 给主循环调：按毫秒预算继续扫目录，扫完就什么都不做 */
+void rdTocPump(uint32_t budgetMs) {
+  if (gTocDone || !gOpen) return;
+  uint32_t t0 = millis();
+  while (!gTocDone && (uint32_t)(millis() - t0) < budgetMs) {
+    if (!tocPump(16 * 1024)) break;
+  }
+}
+
+bool rdTocReady() { return gTocDone; }
 
 /* ==================== 书目 ==================== */
 /* 只认 .ezzbk：纯文本/二进制没有容器头，正文里出现 0x00、超大单行都会让
@@ -626,6 +651,8 @@ static void closeCurrent() {
   gBlkCount = 0;
   gBlkCur = -1;
   gTocN = 0;
+  gTocPos = 0;
+  gTocDone = true;
   gOpen = false;
   gName[0] = 0;
   gSize = 0;
@@ -712,7 +739,8 @@ bool rdOpenIndex(int i) {
 
   gOpen = true;
   bufReset();
-  buildToc();
+  tocReset();
+  tocPump(256 * 1024);        /* 先扫前 256KB，目录页立刻有内容 */
 
   gStart = gBookPos[i];
   if (gStart >= gSize) gStart = 0;
@@ -770,8 +798,26 @@ void rdSaveProgress() {
 
 int rdTocCount() { return gTocN; }
 
+/* 章节名按需从书里读（共用一节静态缓冲，调用方拿到就立刻用） */
 const char *rdTocName(int i) {
-  return (i >= 0 && i < gTocN) ? gTocName[i] : "";
+  gTocNameBuf[0] = 0;
+  if (i < 0 || i >= gTocN) return gTocNameBuf;
+
+  uint32_t p = gTocOff[i];
+  while (p < gSize && byteAt(p) == '#') p++;
+  while (p < gSize && byteAt(p) == ' ') p++;
+
+  int o = 0;
+  while (p < gSize && o < RD_TOC_NAME - 1) {
+    uint8_t c = byteAt(p);
+    if (c == '\n' || c == 0xFF) break;
+    if (c != '\r') gTocNameBuf[o++] = (char)c;
+    p++;
+  }
+  gTocNameBuf[o] = 0;
+  while (o > 0 && gTocNameBuf[o - 1] == ' ') gTocNameBuf[--o] = 0;
+  utf8TrimTail(gTocNameBuf);          /* 截断别落在半个汉字上 */
+  return gTocNameBuf;
 }
 
 bool rdGotoToc(int i) {
