@@ -116,6 +116,7 @@ void btCfgSetTz(int tz) {
 #define TT_TMP           "/tt.tmp"
 #define TT_TMP_MAX       65536    /* 暂存上限 64KB（约 1500 条），防跑飞把 flash 写满 */
 #define TT_TMP_FREE_MIN  16384    /* reset 时要求至少这么多空闲，免得写到一半满 */
+static char     gTtErr[64];          /* addcourse 的错误文案（含条数上限） */
 static uint32_t gTtBytes = 0;
 static uint32_t gTtHash  = 2166136261u;   /* FNV-1a 初值，与传书一致 */
 
@@ -574,7 +575,8 @@ static void handleJson(const char *in, size_t len) {
     int idx = ttAddEx(name, day, start, end, par, glob);
     if (idx < 0) {
       resp["ok"]  = false;
-      resp["msg"] = "保存失败：名称/星期/时间不合法，或已满 72 条";
+      snprintf(gTtErr, sizeof(gTtErr), "保存失败：名称/星期/时间不合法，或已满 %d 条", TT_MAX);
+      resp["msg"] = gTtErr;
     } else {
       resp["ok"]  = true;
       resp["msg"] = "已保存";

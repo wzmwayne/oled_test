@@ -187,7 +187,7 @@ def main():
         raw = b"".join(rec(c, *by_code[c]) for c in part)
         cobj = zlib.compressobj(9, zlib.DEFLATED, -14)
         comp = cobj.compress(raw) + cobj.flush()
-        idx.append((part[0], len(part), len(comp)))
+        idx.append((part[0], part[-1], len(comp)))   # first, last, 压缩长度
         blocks.append(comp)
 
     hdr_len = 40
@@ -211,8 +211,8 @@ def main():
 
     buf += tierA_bytes
     rel = 0
-    for first, cnt, clen in idx:
-        buf += struct.pack("<HHI", first, cnt, rel)
+    for first, last, clen in idx:
+        buf += struct.pack("<HHI", first, last, rel)
         rel += clen
     for b in blocks:
         buf += b
@@ -260,9 +260,9 @@ def main():
     H.append("} wqy14_hdr_t;")
     H.append("")
     H.append("typedef struct {")
-    H.append("  uint16_t first_rune;")
-    H.append("  uint16_t count;")
-    H.append("  uint32_t rel_off;")
+    H.append("  uint16_t first_rune;   /* 本块最小码位 */")
+    H.append("  uint16_t last_rune;    /* 本块最大码位（块内不平移，不能拿 first+count 当上界） */")
+    H.append("  uint32_t rel_off;      /* 相对数据区起点 */")
     H.append("} wqy14_blk_t;")
     H.append("")
     with open(args.header, "w", encoding="utf-8") as f:

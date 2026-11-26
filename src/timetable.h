@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define TT_MAX       72     /* 12 个节次 x 6 天也放得下；含午自习/午休/午餐 */
+#define TT_MAX       192    /* 6 天 x 32 个时间点；当前课表 69 条，留足加课余量 */
 #define TT_NAME_MAX  24     /* UTF-8 字节数，约 8 个汉字 */
 
 typedef struct {

@@ -17,7 +17,7 @@ object CourseSync {
         guard: Int,
         done: (List<Course>?, String?) -> Unit
     ) {
-        if (guard > 40) {
+        if (guard > 64) {              /* 每页 4 条，64 页 = 256 条，够 192 的上限 */
             done(acc, null)
             return
         }

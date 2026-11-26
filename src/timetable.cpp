@@ -217,11 +217,11 @@ bool ttMatches(const TtCourse *c) {
 }
 
 int ttDayList(int day, int *out, int max) {
+  static int idx[TT_MAX];        /* 只在主循环调用，挪出栈节省 4*TT_MAX 字节 */
   int n = 0;
-  int  idx[TT_MAX];
   for (int i = 0; i < gTtN; i++)
     if (gTt[i].day == day && ttMatches(&gTt[i])) idx[n++] = i;
-  /* 按开始时间插入排序（最多 60 条，够用） */
+  /* 按开始时间插入排序（最多 TT_MAX 条） */
   for (int i = 1; i < n; i++) {
     int v = idx[i], j = i - 1;
     while (j >= 0 && gTt[idx[j]].start > gTt[v].start) { idx[j + 1] = idx[j]; j--; }

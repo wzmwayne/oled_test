@@ -312,7 +312,13 @@ static esp_partition_mmap_handle_t gFontMap = 0;
 /* 块解码缓冲：按字形结构体对齐，tinfl 直接往里写 */
 static wqy14_glyph_t gBlkGlyphs[WQY14_BLOCK_GLYPHS];
 static int           gBlkCur = -1;
+static int           gBlkCnt = 0;      /* 当前块里实际有幾個字 */
 static tinfl_decompressor *gFontTinf = nullptr;
+
+/* 诊断计数：info 里打印，查"某些字不显示"时先看这几个数 */
+static uint32_t gFontBlkLoads = 0;     /* tierB 解压次数 */
+static uint32_t gFontBlkFail  = 0;     /* 解压/长度校验失败次数 */
+static uint32_t gFontMiss     = 0;     /* 两层都没找到（真的缺字） */
 
 /* 解压第 b 块到 gBlkGlyphs（失败返回 false） */
 static bool fontLoadBlock(int b) {
@@ -334,11 +340,17 @@ static bool fontLoadBlock(int b) {
   tinfl_status st = tinfl_decompress(gFontTinf, gBlkData + off, &inLen,
                                      (uint8_t *)gBlkGlyphs, (uint8_t *)gBlkGlyphs,
                                      &outLen, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-  if (st != TINFL_STATUS_DONE || outLen != (size_t)e->count * WQY14_GLYPH_BYTES) {
+  uint32_t cnt = (uint32_t)(outLen / WQY14_GLYPH_BYTES);
+  if (st != TINFL_STATUS_DONE || cnt == 0 || cnt > WQY14_BLOCK_GLYPHS) {
     gBlkCur = -1;
+    if (gFontBlkFail < 3)      /* 只报前几次，别刷屏 */
+      logf("[字库] 块 %d 解压失败 st=%d out=%u\r\n", b, (int)st, (unsigned)outLen);
+    gFontBlkFail++;
     return false;
   }
+  gBlkCnt = (int)cnt;
   gBlkCur = b;
+  gFontBlkLoads++;
   return true;
 }
 
@@ -406,18 +418,21 @@ static const wqy14_glyph_t *findGlyph(uint32_t cp) {
     if (r < cp) lo = mid + 1; else hi = mid - 1;
   }
 
-  /* tierB：先按每块首码位二分，再解压该块线性扫 */
+  /* tierB：按 [first_rune, last_rune] 二分定位块，解压后线性扫。
+   * 注意不能用 first + count 当上界——块内码位是稀疏的（标点/符号区跳得厉害），
+   * 之前就是这么写的，导致 2781 个字形（含大量符号）永远查不到。 */
   lo = 0; hi = (int)gFontHdr->block_count - 1;
   while (lo <= hi) {
     int mid = (lo + hi) >> 1;
     const wqy14_blk_t *e = &gBlkIdx[mid];
     if (cp < e->first_rune) { hi = mid - 1; continue; }
-    if (cp >= (uint32_t)e->first_rune + e->count) { lo = mid + 1; continue; }
+    if (cp > e->last_rune)  { lo = mid + 1; continue; }
     if (!fontLoadBlock(mid)) return nullptr;
-    for (int k = 0; k < (int)e->count; k++)
+    for (int k = 0; k < gBlkCnt; k++)
       if (gBlkGlyphs[k].rune == cp) return &gBlkGlyphs[k];
     return nullptr;
   }
+  gFontMiss++;
   return nullptr;
 }
 
@@ -957,6 +972,10 @@ static void durText(char *buf, size_t n, int min) {
  *   今天的课都上完了
  * 后面那句（下节 / 下下节）没有对应课程时整段省掉，不显示「无」。
  * 名词用课名，时间统一成人话（"45分" / "1小时20分"）。 */
+/* 按天取课表用的索引缓冲：TT_MAX 提到 192 后，四处各压 768B 到栈上太浪费，
+ * 统一用这一块（同一时刻只有一处在用）。 */
+static int gDayIdx[TT_MAX];
+
 static void drawHomeSchedule() {
   if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
@@ -964,21 +983,20 @@ static void drawHomeSchedule() {
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
   int  nowMin = (int)gNow.hour * 60 + gNow.minute;
 
-  int idx[TT_MAX];
-  int n = ttDayList(today, idx, TT_MAX);
+  int n = ttDayList(today, gDayIdx, TT_MAX);
   if (n == 0) { drawCenter(ROW3, "今天没课"); return; }
 
   /* 一次遍历：正在上 / 下节 / 下下节。
    * 事件（start==end）不会"正在上"，只会作为下节/下下节出现。 */
   int cur = -1, nx = -1, nn = -1;
   for (int i = 0; i < n; i++) {
-    const TtCourse *c = ttGet(idx[i]);
+    const TtCourse *c = ttGet(gDayIdx[i]);
     if (!c || c->global) continue;               /* 全局事件不参与时间线 */
     if (c->start != c->end && nowMin >= (int)c->start && nowMin < (int)c->end) {
-      cur = idx[i];
+      cur = gDayIdx[i];
     } else if ((int)c->start > nowMin) {
-      if (nx < 0)      nx = idx[i];
-      else if (nn < 0) { nn = idx[i]; break; }
+      if (nx < 0)      nx = gDayIdx[i];
+      else if (nn < 0) { nn = gDayIdx[i]; break; }
     }
   }
   const char *nxN = (nx >= 0 && ttGet(nx)) ? ttGet(nx)->name : nullptr;
@@ -1002,25 +1020,23 @@ static void drawHomeSchedule() {
     snprintf(line, sizeof(line), "今天的课都上完了");
   }
 
-  /* 全局事件：按离现在由近到远追加，已经过去的不要。
-   * 显示成「<相对>后 名称 <绝对时间>」，如「1小时20分后 放学 17:30」 */
+  /* 全局事件：取离现在最近的两个（已过去的跳过），拼在句子末尾。
+   * 显示成「<相对>后 名称 <绝对时间>」，如「1小时20分后 放学 18:40」。
+   * 一遍扫出两个最小 start，不再需要 used[TT_MAX]（192 条时是 192B 栈 + O(2n)）。 */
   {
-    bool used[TT_MAX] = {false};
+    int e1 = -1, e2 = -1;
+    for (int i = 0; i < n; i++) {
+      const TtCourse *c = ttGet(gDayIdx[i]);
+      if (!c || !c->global) continue;
+      if ((int)c->start <= nowMin) continue;                 /* 已经过去 */
+      if (e1 < 0 || c->start < ttGet(gDayIdx[e1])->start) { e2 = e1; e1 = i; }
+      else if (e2 < 0 || c->start < ttGet(gDayIdx[e2])->start) { e2 = i; }
+    }
     char tail[64];
-    int  shown = 0;
-    for (int k = 0; k < TT_MAX; k++) {
-      int best = -1;
-      for (int i = 0; i < n; i++) {
-        if (used[i]) continue;
-        const TtCourse *c = ttGet(idx[i]);
-        if (!c || !c->global) continue;
-        if ((int)c->start <= nowMin) { used[i] = true; continue; }   /* 已过 */
-        if (best < 0 || c->start < ttGet(idx[best])->start) best = i;
-      }
-      if (best < 0 || shown >= 2) break;    /* 最多两个，再多滚起来就看不过来了 */
-      used[best] = true;
-      shown++;
-      const TtCourse *c = ttGet(idx[best]);
+    int  pick[2] = { e1, e2 };
+    for (int k = 0; k < 2; k++) {
+      if (pick[k] < 0) continue;                             /* 最多两个 */
+      const TtCourse *c = ttGet(gDayIdx[pick[k]]);
       durText(d2, sizeof(d2), (int)c->start - nowMin);
       snprintf(tail, sizeof(tail), "，%s后 %s %02u:%02u", d2, c->name,
                (unsigned)(c->start / 60), (unsigned)(c->start % 60));
@@ -1110,14 +1126,13 @@ static int schShowDay() {
 /* 把光标落在"正在上"或"下一个"的课/事件上。
  * 课程看 end > now（含正在进行），事件是单点，看 start >= now。 */
 static void schFocusNow() {
-  int idx[TT_MAX];
-  int n = ttDayList(schShowDay(), idx, TT_MAX);
+  int n = ttDayList(schShowDay(), gDayIdx, TT_MAX);
   if (n <= 0) { gSchSel = 0; return; }
   if (!gNowOk || gSchDay != 0) { gSchSel = 0; return; }   /* 非今天就不猜 */
 
   int nowMin = (int)gNow.hour * 60 + gNow.minute;
   for (int i = 0; i < n; i++) {
-    const TtCourse *c = ttGet(idx[i]);
+    const TtCourse *c = ttGet(gDayIdx[i]);
     if (!c) continue;
     bool hit = (c->start == c->end) ? ((int)c->start >= nowMin)
                                     : ((int)c->end > nowMin);
@@ -1144,9 +1159,8 @@ static void itemSch(int i, char *buf, size_t n, char *rt, size_t rn) {
 }
 
 static void drawSchedule() {
-  int  idx[TT_MAX];
   int  day = schShowDay();
-  int  n   = ttDayList(day, idx, TT_MAX);
+  int  n   = ttDayList(day, gDayIdx, TT_MAX);
   char title[64];
 
   snprintf(title, sizeof(title), "课表 %s周%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
@@ -1154,7 +1168,7 @@ static void drawSchedule() {
   if (gSchSel >= n) gSchSel = n - 1;
   if (gSchSel < 0)  gSchSel = 0;
 
-  gSchIdx = idx;
+  gSchIdx = gDayIdx;
   uiList(title, nullptr, n, gSchSel, 3, ROW1, itemSch);
   gSchIdx = nullptr;
 }
@@ -1565,8 +1579,7 @@ static void handleKeys() {
 
     case APP_SCHEDULE: {
       /* 0/1 翻课；# 短按换星期（今天→周一…周日），长按回今天；短按 * 回主页 */
-      int idx[TT_MAX];
-      int n = ttDayList(schShowDay(), idx, TT_MAX);
+      int n = ttDayList(schShowDay(), gDayIdx, TT_MAX);
       if ((zeroS || zeroR) && gSchSel > 0)     gSchSel--;
       if ((oneS  || oneR)  && gSchSel < n - 1) gSchSel++;
       if (hashL) { gSchDay = 0; gSchSel = 0; schFocusNow(); }
@@ -1652,6 +1665,9 @@ static void printInfo() {
        (gWakeLocks & WL_STOPWATCH) ? "正计时 " : "",
        (gWakeLocks & WL_TIMER) ? "倒计时" : "");
   logf("字库    : %s\r\n", gFontOk ? "已 mmap" : "未加载");
+  if (gFontOk)
+    logf("字库读取: tierB 解压 %u 次，失败 %u，缺字 %u\r\n",
+         (unsigned)gFontBlkLoads, (unsigned)gFontBlkFail, (unsigned)gFontMiss);
   logf("课表    : %d 条，本周%s\r\n", ttCount(), ttIsOddWeek() ? "单周" : "双周");
   logf("循环    : 最坏 %u ms\r\n", (unsigned)gLoopMaxMs);
   logf("自由堆  : %u B\r\n", (unsigned)ESP.getFreeHeap());
