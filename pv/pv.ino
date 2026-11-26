@@ -1,37 +1,44 @@
 /*
- * pv.ino — world.execute(me); 风格的字幕 PV（纯视觉，无音乐）
+ * pv.ino — 128x64 单色 OLED 版 world.execute(me); 视觉 PV（无音乐、无歌词）
  *
- * 独立小程序，沿用主固件的分区表与 FNT2 字库：
- *   - 只占用 app0（0x10000），字库从 font 分区（0x1A0000）mmap
- *   - 上电直接进 PV 待机画面，按 # 开始播放，按 * 回待机
- *   - 不碰 LittleFS / NVS：刷这个程序不会动书库和配置
+ * 结构参考 FrostNovaOrg/world-execute-web（AGPL-3.0）公开的分段时间轴与
+ * 视觉母题（终端 / 晶格 / 涟漪 / 隧道 / 网络 / 字形 / 频谱 / 翻牌 /
+ * 碎屑 / 损坏 / 像素排序 / 代码 / 心电 / 地球 / 标志）。
+ * 只借“哪一段是哪种画面”的结构与 130 BPM 节拍；代码自写，未复制其源码、
+ * 字体、图片、音频。歌词与官方译文版权归 Mili，本项目不收录。
  *
- * 刷写：esptool write_flash 0x10000 pv.ino.bin
- * 回到主固件：./getfw.sh 再刷 0x10000
+ * 为这块屏专门做的取舍（不是把网页版硬塞进来）：
+ *   - 1 bit 单色：只用实心块/粗线/大字，不搞细线线框和灰阶抖动
+ *   - 128x64 太小：主体走 2 倍字（4 个字一行）或整块图形，细节一律砍掉
+ *   - 防烧屏：不放常驻进度条、不在固定位置长期挂小字；
+ *     章节号只在每段开场闪 2 秒，反白闪每次只留 1~2 帧
+ *   - 帧率 25fps：整帧 1KB，400kHz I2C 下约 25KB/s，留出余量
  *
- * 时间轴里只放标题和抽象字形/符号，不含歌词文本；想换成自己的字幕，
- * 改下面的 CUES 表重新编译即可。
+ * 独立程序：沿用主固件分区表与 FNT2 字库，只占 app0（0x10000），
+ * 不碰 NVS / LittleFS。上电进待机，按 # 从头播放，按 * 回待机。
  */
 #include <Wire.h>
 #include <esp_partition.h>
 #include <esp_random.h>
 #include "miniz.h"
-#include "font_wqy14.h"    /* 构建前由 CI/refresh_pv.sh 从 src/ 复制过来 */
+#include "font_wqy14.h"
 
 #define OLED_SDA   6
 #define OLED_SCL   7
-#define KEY_HASH   4        /* # 开始 */
-#define KEY_STAR   5        /* * 回待机 */
+#define KEY_HASH   4
+#define KEY_STAR   5
 
 #define SCREEN_W   128
 #define SCREEN_H   64
 #define I2C_CHUNK  64
-#define FRAME_MS   33       /* 30fps */
+#define FRAME_MS   40          /* 25fps，给 I2C 留余量 */
+
+#define BEAT_MS    461.5f      /* 130 BPM 4/4，取自公开分析数据 */
+#define BEAT0_MS   297.6f
 
 /* ==================== OLED ==================== */
 static uint8_t  gBuf[SCREEN_W * SCREEN_H / 8];
 static uint8_t  gOledAddr = 0x3C;
-static uint32_t gI2cErr = 0;
 
 static bool i2cWrite(uint8_t addr, uint8_t ctrl, const uint8_t *d, size_t n) {
   bool ok = true;
@@ -40,37 +47,60 @@ static bool i2cWrite(uint8_t addr, uint8_t ctrl, const uint8_t *d, size_t n) {
     Wire.beginTransmission(addr);
     Wire.write(ctrl);
     Wire.write(d + off, m);
-    if (Wire.endTransmission() != 0) { ok = false; gI2cErr++; }
+    if (Wire.endTransmission() != 0) ok = false;
   }
   return ok;
 }
-static void oledCmd(uint8_t c) { i2cWrite(gOledAddr, 0x00, &c, 1); }
 static void oledCmdSeq(const uint8_t *c, size_t n) { i2cWrite(gOledAddr, 0x00, c, n); }
 
 static void clearBuf() { memset(gBuf, 0, sizeof(gBuf)); }
 static void fillBuf(uint8_t v) { memset(gBuf, v, sizeof(gBuf)); }
-
 static void setPixel(int x, int y, bool on) {
   if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
   uint16_t i = (uint16_t)y / 8 * SCREEN_W + x;
   uint8_t  b = 1 << (y & 7);
   if (on) gBuf[i] |= b; else gBuf[i] &= (uint8_t)~b;
 }
+static bool getPixel(int x, int y) {
+  if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return false;
+  return (gBuf[(uint16_t)y / 8 * SCREEN_W + x] >> (y & 7)) & 1;
+}
 static void hline(int x0, int x1, int y) { for (int x = x0; x <= x1; x++) setPixel(x, y, true); }
 static void vline(int y0, int y1, int x) { for (int y = y0; y <= y1; y++) setPixel(x, y, true); }
-static void fillRect(int x0, int y0, int x1, int y1) {
-  for (int y = y0; y <= y1; y++) hline(x0, x1, y);
-}
+static void fillRect(int x0, int y0, int x1, int y1) { for (int y = y0; y <= y1; y++) hline(x0, x1, y); }
 static void drawRect(int x0, int y0, int x1, int y1) {
-  hline(x0, x1, y0); hline(x0, x1, y1);
-  vline(y0, y1, x0); vline(y0, y1, x1);
+  hline(x0, x1, y0); hline(x0, x1, y1); vline(y0, y1, x0); vline(y0, y1, x1);
+}
+/* 粗线：小屏上 1px 斜线会断成虚点，至少要 2px */
+static void thickLine(int x0, int y0, int x1, int y1, int w) {
+  int dx = abs(x1 - x0), dy = abs(y1 - y0);
+  int n = (dx > dy ? dx : dy) + 1;
+  for (int i = 0; i < n; i++) {
+    int x = x0 + (x1 - x0) * i / n;
+    int y = y0 + (y1 - y0) * i / n;
+    fillRect(x, y, x + w - 1, y + w - 1);
+  }
+}
+static void circle(int cx, int cy, int r, int w) {
+  int x = r, y = 0, err = 1 - r;
+  while (x >= y) {
+    fillRect(cx + x, cy + y, cx + x + w - 1, cy + y + w - 1);
+    fillRect(cx + y, cy + x, cx + y + w - 1, cy + x + w - 1);
+    fillRect(cx - y, cy + x, cx - y + w - 1, cy + x + w - 1);
+    fillRect(cx - x, cy + y, cx - x + w - 1, cy + y + w - 1);
+    fillRect(cx - x, cy - y, cx - x + w - 1, cy - y + w - 1);
+    fillRect(cx - y, cy - x, cx - y + w - 1, cy - x + w - 1);
+    fillRect(cx + y, cy - x, cx + y + w - 1, cy - x + w - 1);
+    fillRect(cx + x, cy - y, cx + x + w - 1, cy - y + w - 1);
+    y++;
+    if (err < 0) err += 2 * y + 1; else { x--; err += 2 * (y - x) + 1; }
+  }
 }
 static void flush() {
   static const uint8_t win[6] = { 0x21, 0x00, 0x7F, 0x22, 0x00, 0x07 };
   oledCmdSeq(win, sizeof(win));
   i2cWrite(gOledAddr, 0x40, gBuf, sizeof(gBuf));
 }
-
 static bool oledInit() {
   static const uint8_t seq[] = {
     0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
@@ -82,30 +112,24 @@ static bool oledInit() {
   return true;
 }
 
-/* ==================== 字库（FNT2 分层容器） ==================== */
-static const wqy14_hdr_t   *gFontHdr  = nullptr;
-static const wqy14_glyph_t *gTierA    = nullptr;
-static const wqy14_blk_t   *gBlkIdx   = nullptr;
-static const uint8_t       *gBlkData  = nullptr;
-static bool                 gFontOk   = false;
-static bool                 gFontLegacy = false;
+/* ==================== FNT2 字库 ==================== */
+static const wqy14_hdr_t   *gFontHdr = nullptr;
+static const wqy14_glyph_t *gTierA   = nullptr;
+static const wqy14_blk_t   *gBlkIdx  = nullptr;
+static const uint8_t       *gBlkData = nullptr;
+static bool                 gFontOk  = false, gFontLegacy = false;
 static wqy14_glyph_t        gBlkGlyphs[WQY14_BLOCK_GLYPHS];
-static int                  gBlkCur = -1;
-static int                  gBlkCnt = 0;
+static int                  gBlkCur = -1, gBlkCnt = 0;
 static tinfl_decompressor  *gTinf = nullptr;
 
 static bool fontLoadBlock(int b) {
   if (b == gBlkCur) return true;
   if (!gFontHdr || b < 0 || b >= gFontHdr->block_count) return false;
-  if (!gTinf) {
-    gTinf = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor));
-    if (!gTinf) return false;
-  }
+  if (!gTinf) { gTinf = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor)); if (!gTinf) return false; }
   const wqy14_blk_t *e = &gBlkIdx[b];
   uint32_t off = e->rel_off;
   uint32_t end = (b + 1 < gFontHdr->block_count) ? gBlkIdx[b + 1].rel_off : gFontHdr->data_len;
   if (end <= off || end > gFontHdr->data_len) return false;
-
   tinfl_init(gTinf);
   size_t inLen = end - off, outLen = sizeof(gBlkGlyphs);
   tinfl_status st = tinfl_decompress(gTinf, gBlkData + off, &inLen,
@@ -113,42 +137,32 @@ static bool fontLoadBlock(int b) {
                                      &outLen, TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
   uint32_t cnt = (uint32_t)(outLen / WQY14_GLYPH_BYTES);
   if (st != TINFL_STATUS_DONE || cnt == 0 || cnt > WQY14_BLOCK_GLYPHS) { gBlkCur = -1; return false; }
-  gBlkCnt = (int)cnt;
-  gBlkCur = b;
-  return true;
+  gBlkCnt = (int)cnt; gBlkCur = b; return true;
 }
-
 static bool fontMount() {
   const esp_partition_t *p = esp_partition_find_first(
       ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "font");
   if (!p) return false;
   const void *ptr = nullptr;
   esp_partition_mmap_handle_t map = 0;
-  if (esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &ptr, &map) != ESP_OK || !ptr)
-    return false;
-
+  if (esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &ptr, &map) != ESP_OK || !ptr) return false;
   const wqy14_hdr_t *h = (const wqy14_hdr_t *)ptr;
   const uint8_t *base = (const uint8_t *)ptr;
-  bool ok = (p->size > sizeof(wqy14_hdr_t))
-            && !memcmp(h->magic, "FNT2", 4)
+  bool ok = (p->size > sizeof(wqy14_hdr_t)) && !memcmp(h->magic, "FNT2", 4)
             && (h->ver == 3 || h->ver == 2)
-            && h->tier_a_count == WQY14_TIER_A
-            && h->total_count == WQY14_COUNT
+            && h->tier_a_count == WQY14_TIER_A && h->total_count == WQY14_COUNT
             && h->block_glyphs == WQY14_BLOCK_GLYPHS
             && (uint32_t)h->tier_a_off + (uint32_t)h->tier_a_count * WQY14_GLYPH_BYTES <= p->size
             && (uint32_t)h->block_idx_off + (uint32_t)h->block_count * sizeof(wqy14_blk_t) <= p->size
             && (uint32_t)h->data_off + h->data_len <= p->size;
   if (!ok) return false;
-
-  gFontHdr = h;
-  gFontLegacy = (h->ver == 2);
-  gTierA   = (const wqy14_glyph_t *)(base + h->tier_a_off);
-  gBlkIdx  = (const wqy14_blk_t *)(base + h->block_idx_off);
+  gFontHdr = h; gFontLegacy = (h->ver == 2);
+  gTierA = (const wqy14_glyph_t *)(base + h->tier_a_off);
+  gBlkIdx = (const wqy14_blk_t *)(base + h->block_idx_off);
   gBlkData = base + h->data_off;
-  gFontOk  = true;
+  gFontOk = true;
   return true;
 }
-
 static const wqy14_glyph_t *findGlyph(uint32_t cp) {
   if (!gFontOk || cp > 0xFFFF) return nullptr;
   int lo = 0, hi = (int)gFontHdr->tier_a_count - 1;
@@ -164,10 +178,9 @@ static const wqy14_glyph_t *findGlyph(uint32_t cp) {
     const wqy14_blk_t *e = &gBlkIdx[mid];
     uint32_t upper = gFontLegacy ? (uint32_t)e->first_rune + e->last_rune : e->last_rune;
     if (cp < e->first_rune) { hi = mid - 1; continue; }
-    if (cp > upper)         { lo = mid + 1; continue; }
+    if (cp > upper) { lo = mid + 1; continue; }
     if (!fontLoadBlock(mid)) return nullptr;
-    for (int k = 0; k < gBlkCnt; k++)
-      if (gBlkGlyphs[k].rune == cp) return &gBlkGlyphs[k];
+    for (int k = 0; k < gBlkCnt; k++) if (gBlkGlyphs[k].rune == cp) return &gBlkGlyphs[k];
     return nullptr;
   }
   return nullptr;
@@ -188,12 +201,10 @@ static uint32_t utf8Next(const char *&s) {
   }
   return cp;
 }
-
 static int drawTextMode(int x, int y, const char *s, uint8_t scale, bool mode) {
   int cx = x;
-  const char *p = s;
-  while (*p) {
-    uint32_t cp = utf8Next(p);
+  while (*s) {
+    uint32_t cp = utf8Next(s);
     const wqy14_glyph_t *g = findGlyph(cp);
     if (!g) { cx += 8 * scale; continue; }
     for (int row = 0; row < WQY14_HEIGHT; row++) {
@@ -211,217 +222,307 @@ static int drawTextMode(int x, int y, const char *s, uint8_t scale, bool mode) {
   }
   return cx;
 }
-
 static int textWidth(const char *s, uint8_t scale) {
-  int w = 0; const char *p = s;
-  while (*p) { const wqy14_glyph_t *g = findGlyph(utf8Next(p)); w += (g ? g->w : 8) * scale; }
+  int w = 0;
+  while (*s) { const wqy14_glyph_t *g = findGlyph(utf8Next(s)); w += (g ? g->w : 8) * scale; }
   return w;
 }
-static void drawText(int x, int y, const char *s) { drawTextMode(x, y, s, 1, true); }
-static void drawCenter(int y, const char *s, uint8_t scale) {
-  int w = textWidth(s, scale);
-  drawTextMode((SCREEN_W - w) / 2, y, s, scale, true);
+/* 大标题：2 倍字，屏幕只放得下 4 个汉字 / 8 个 ASCII */
+static void bigText(int y, const char *s) {
+  drawTextMode((SCREEN_W - textWidth(s, 2)) / 2, y, s, 2, true);
+}
+static void smallText(int y, const char *s) {
+  drawTextMode((SCREEN_W - textWidth(s, 1)) / 2, y, s, 1, true);
 }
 
-/* ==================== 时间轴 ==================== */
+/* ==================== 节拍 ==================== */
+static float gT = 0;
+static float beatPhase() {
+  float b = (gT * 1000.0f - BEAT0_MS) / BEAT_MS;
+  float f = b - (long)b;
+  return f < 0 ? f + 1.0f : f;
+}
+static float beatPulse() { return 1.0f - beatPhase(); }
+
+/* ==================== 效果（全部按“小屏可读”重画） ==================== */
 enum Fx {
-  FX_TITLE,     /* 标题两行 + 闪烁光标 */
-  FX_TYPE,      /* 打字机 */
-  FX_BIG,       /* 2 倍大字 + 反白闪 */
-  FX_GLITCH,    /* 文字 + 随机行错位/噪点 */
-  FX_BARS,      /* 竖条扫过 + 小字 */
-  FX_MATRIX,    /* 0/1 雨 */
-  FX_INVERT,    /* 反白底黑字 */
-  FX_SCROLL,    /* 横向滚动 */
-  FX_COUNT      /* 帧计数 */
+  FX_TERM, FX_LATTICE, FX_RIPPLE, FX_TUNNEL, FX_NET, FX_GLYPH,
+  FX_FLIPDOT, FX_SPECTRUM, FX_SHARDS, FX_CORRUPT, FX_PIXELSORT,
+  FX_CODE, FX_CHANT, FX_HEART, FX_WORLD, FX_LOGO
 };
 
-typedef struct {
-  uint16_t    dur;
-  uint8_t     fx;
-  const char *txt;
-} Cue;
-
-/* 只放标题与抽象符号，不含歌词。想换成自己的字幕就改这张表。 */
-static const Cue CUES[] = {
-  { 2600, FX_TITLE,   "world.execute(me);" },
-  { 1400, FX_TYPE,    "execute" },
-  { 1400, FX_TYPE,    "me;" },
-  { 1600, FX_BIG,     "me;" },
-  { 1200, FX_GLITCH,  "world.execute(me);" },
-  { 1500, FX_BARS,    "SYSTEM" },
-  { 2400, FX_MATRIX,  "" },
-  { 1200, FX_INVERT,  "01" },
-  { 2400, FX_SCROLL,  "// world.execute(me); //" },
-  { 1500, FX_COUNT,   "" },
-  { 2600, FX_TITLE,   "world.execute(me);" },
-};
-#define CUE_N (sizeof(CUES) / sizeof(CUES[0]))
-
-static uint32_t gTotalMs = 0;
-
-static void computeTotal() {
-  gTotalMs = 0;
-  for (uint32_t i = 0; i < CUE_N; i++) gTotalMs += CUES[i].dur;
+/* 1 终端：四行等宽字，逐行弹出，块状光标 */
+static void fxTerm(float p) {
+  static const char *L[] = { "> boot", "> font", "> run", "> me;" };
+  int n = (int)(p * 4.0f) + 1;
+  if (n > 4) n = 4;
+  for (int i = 0; i < n; i++) drawText(4, 2 + i * 15, L[i]);
+  int y = 2 + n * 15;
+  if (y < 56 && ((int)(gT * 4) & 1) == 0) fillRect(4, y, 9, y + 11);
 }
 
-/* ==================== 效果 ==================== */
-static void fxTitle(const char *txt, uint32_t ms, uint16_t dur) {
-  drawCenter(18, "world.", 1);
-  drawCenter(36, "execute(me);", 1);
-  if (((ms / 400) & 1) == 0) {
-    int w2 = textWidth("execute(me);", 1);
-    int cx = (SCREEN_W + w2) / 2 + 2;          /* 紧跟第二行文字右边 */
-    fillRect(cx, 36, cx + 1, 48);
-  }
-  if (ms > dur - 400) { fillRect(0, 0, SCREEN_W - 1, 13); }
-  (void)txt;
+/* 2 晶格：旋转的大方块（2px 边）+ 十字 */
+static void fxLattice(float p) {
+  int r = 16 + (int)(beatPulse() * 6);
+  float a = p * 12.566f;
+  int x0 = 64 + (int)(cosf(a) * r), y0 = 32 + (int)(sinf(a) * r);
+  int x1 = 64 + (int)(cosf(a + 1.5708f) * r), y1 = 32 + (int)(sinf(a + 1.5708f) * r);
+  int x2 = 64 + (int)(cosf(a + 3.1416f) * r), y2 = 32 + (int)(sinf(a + 3.1416f) * r);
+  int x3 = 64 + (int)(cosf(a + 4.7124f) * r), y3 = 32 + (int)(sinf(a + 4.7124f) * r);
+  thickLine(x0, y0, x1, y1, 2); thickLine(x1, y1, x2, y2, 2);
+  thickLine(x2, y2, x3, y3, 2); thickLine(x3, y3, x0, y0, 2);
+  fillRect(62, 30, 65, 33);
 }
 
-static void fxType(const char *txt, uint32_t ms, uint16_t dur) {
-  int len = 0;
-  for (const char *p = txt; *p; ) { utf8Next(p); len++; }
-  int shown = (int)((uint64_t)len * ms / (dur > 600 ? dur - 300 : dur));
-  if (shown > len) shown = len;
-  char buf[40];
-  int o = 0, k = 0;
-  for (const char *p = txt; *p && k < shown; ) {
-    const char *q = p; utf8Next(q);
-    int n = (int)(q - p);
-    if (o + n < (int)sizeof(buf)) { memcpy(buf + o, p, n); o += n; }
-    p = q; k++;
+/* 3 涟漪：三道 2px 圆环，随拍扩散 */
+static void fxRipple(float p) {
+  int r0 = 6 + (int)((1.0f - beatPulse()) * 26);
+  for (int k = 0; k < 3; k++) {
+    int r = r0 - k * 9;
+    if (r > 2) circle(64, 32, r, 2);
   }
-  buf[o] = 0;
-  drawCenter(24, buf, 1);
-  if (((ms / 200) & 1) == 0) {
-    int w = textWidth(buf, 1);
-    fillRect((SCREEN_W - w) / 2 + w + 1, 24, (SCREEN_W - w) / 2 + w + 2, 36);
+  fillRect(62, 30, 65, 33);
+  (void)p;
+}
+
+/* 4 隧道：四层粗方框由中心向外 */
+static void fxTunnel(float p) {
+  for (int k = 0; k < 4; k++) {
+    int z = ((int)(p * 36) + k * 12) % 48;
+    int w = 4 + z, h = 3 + z / 2;
+    if (2 * w >= SCREEN_W || 2 * h >= SCREEN_H) continue;
+    drawRect(64 - w, 32 - h, 64 + w, 32 + h);
+    if (k == 0) drawRect(64 - w + 1, 32 - h + 1, 64 + w - 1, 32 + h - 1);
   }
 }
 
-static void fxBig(const char *txt, uint32_t ms, uint16_t dur) {
-  bool inv = ((ms / 250) & 1) != 0;
+/* 5 网络：8 个节点 + 2px 连线 */
+static void fxNet(float p) {
+  enum { N = 8 };
+  static int px[N], py[N], vx[N], vy[N];
+  static bool init = false;
+  if (!init) {
+    init = true;
+    for (int i = 0; i < N; i++) { px[i] = 16 + irand(96); py[i] = 10 + irand(44); vx[i] = (irand(2) ? 1 : -1); vy[i] = (irand(2) ? 1 : -1); }
+  }
+  for (int i = 0; i < N; i++) {
+    px[i] += vx[i]; py[i] += vy[i];
+    if (px[i] < 4 || px[i] > SCREEN_W - 5) vx[i] = -vx[i];
+    if (py[i] < 4 || py[i] > SCREEN_H - 5) vy[i] = -vy[i];
+  }
+  for (int i = 0; i < N; i++)
+    for (int j = i + 1; j < N; j++) {
+      int dx = px[i] - px[j], dy = py[i] - py[j];
+      if (dx * dx + dy * dy < 1600) thickLine(px[i], py[i], px[j], py[j], 1);
+    }
+  for (int i = 0; i < N; i++) fillRect(px[i] - 1, py[i] - 1, px[i] + 1, py[i] + 1);
+  (void)p;
+}
+
+/* 6 字形：一次只放一个大字，每两拍换一个（排版母题） */
+static void fxGlyph(float p) {
+  static const char *G[] = { "世", "界", "执", "行", "我", "你", "爱" };
+  int i = (int)(gT / (BEAT_MS * 2 / 1000.0f)) % 7;
+  bigText(10, G[i]);
+  drawRect(6, 6, SCREEN_W - 7, SCREEN_H - 7);
+  (void)p;
+}
+
+/* 7 翻牌点阵：4x4 粗点按波翻转（最像真实翻牌屏） */
+static void fxFlipdot(float p) {
+  for (int gy = 0; gy < 8; gy++)
+    for (int gx = 0; gx < 16; gx++) {
+      float d = sqrtf((float)((gx * 8 - 60) * (gx * 8 - 60) + (gy * 8 - 28) * (gy * 8 - 28)));
+      bool on = sinf(d * 0.22f - gT * 6.0f) > 0.0f;
+      if (on) fillRect(gx * 8 + 1, gy * 8 + 1, gx * 8 + 5, gy * 8 + 5);
+    }
+  (void)p;
+}
+
+/* 8 频谱：10 根粗柱，随拍起伏 */
+static void fxSpectrum() {
+  float pulse = beatPulse();
+  for (int i = 0; i < 10; i++) {
+    int x = 4 + i * 12;
+    int h = 6 + (int)((sinf(i * 0.9f + gT * 4.0f) * 0.5f + 0.5f) * 34 * (0.35f + 0.65f * pulse));
+    fillRect(x, SCREEN_H - 1 - h, x + 8, SCREEN_H - 1);
+  }
+}
+
+/* 9 碎屑：8 块大方块向外飞散 */
+static void fxShards(float p) {
+  for (int i = 0; i < 8; i++) {
+    float a = i * 0.785f + p * 1.5f;
+    int r = 6 + (int)(p * 40);
+    int x = 64 + (int)(cosf(a) * r);
+    int y = 32 + (int)(sinf(a) * r * 0.8f);
+    int s = 4 + (i % 3) * 2;
+    fillRect(x - s / 2, y - s / 2, x + s / 2, y + s / 2);
+  }
+  fillRect(60, 28, 67, 35);
+}
+
+/* 10 损坏：三条粗错位带 + 大字 ERR */
+static void fxCorrupt() {
+  for (int b = 0; b < 3; b++) {
+    int y = 8 + b * 20;
+    int dx = irand(13) - 6;
+    for (int x = 0; x < SCREEN_W; x++)
+      setPixel(x, y + (irand(3) == 0 ? 1 : 0), getPixel((x + dx + SCREEN_W) % SCREEN_W, y));
+    fillRect(0, y, SCREEN_W - 1, y + 1);
+  }
+  if (((int)(gT * 4) & 1) == 0) bigText(22, "ERR");
+}
+
+/* 11 像素排序：横向长短条上下错位 */
+static void fxPixelsort(float p) {
+  for (int y = 0; y < SCREEN_H; y += 4) {
+    int len = 20 + (int)((sinf(y * 0.2f + p * 9.0f) * 0.5f + 0.5f) * 100);
+    int x0 = (int)(gT * 40 + y * 5) % SCREEN_W;
+    for (int k = 0; k < len; k++) setPixel((x0 + k) % SCREEN_W, y, true), setPixel((x0 + k) % SCREEN_W, y + 1, true);
+  }
+}
+
+/* 12 代码：三行伪代码滚动 + 块光标 */
+static void fxCode(float p) {
+  static const char *L[] = {
+    "for (i=0;i<n;i++)",
+    " me.execute(world);",
+    "return 0;",
+  };
+  int off = (int)(gT * 20) % 36;
+  for (int i = 0; i < 3; i++) {
+    int y = 2 + i * 18 - off % 18;
+    if (y < -13 || y > 56) continue;
+    drawText(3, y, L[(i + (int)(p)) % 3]);
+  }
+  if (((int)(gT * 4) & 1) == 0) fillRect(3, 50, 8, 61);
+}
+
+/* 13 吟唱：大字随拍切换 + 每拍一帧反白 */
+static void fxChant(float p) {
+  static const char *W[] = { "01", "//", "00", "me" };
+  int i = (int)(gT / (BEAT_MS / 1000.0f)) % 4;
+  bool inv = beatPhase() < 0.12f;          /* 每拍开头闪一帧 */
   if (inv) fillBuf(0xFF);
-  int w = textWidth(txt, 2);
-  drawTextMode((SCREEN_W - w) / 2, 18, txt, 2, !inv);
-  if (!inv) { hline(20, 108, 50); hline(20, 108, 12); }
-  (void)dur;
+  int w = textWidth(W[i], 2);
+  drawTextMode((SCREEN_W - w) / 2, 18, W[i], 2, !inv);
+  (void)p;
 }
 
-static void fxGlitch(const char *txt, uint32_t ms, uint16_t dur) {
-  int w = textWidth(txt, 1);
-  int x = (SCREEN_W - w) / 2;
-  int y = 24;
-  drawText(x, y, txt);
-  /* 随机把几行整体左右推一下，制造错位 */
-  int shift = (int)(ms / 60) % 7;
-  for (int r = 0; r < 3; r++) {
-    int yy = 20 + r * 10 + (esp_random() % 3);
-    int dx = (int)(esp_random() % 11) - 5 + shift;
-    for (int xx = 0; xx < SCREEN_W; xx++) {
-      int sx = xx + dx;
-      if (sx < 0 || sx >= SCREEN_W) continue;
-      uint16_t i = (uint16_t)yy / 8 * SCREEN_W + xx;
-      uint8_t  b = 1 << (yy & 7);
-      uint16_t j = (uint16_t)yy / 8 * SCREEN_W + sx;
-      if (gBuf[j] & b) gBuf[i] |= b; else gBuf[i] &= (uint8_t)~b;
-    }
+/* 14 心电：粗波形 + 大心形 */
+static void fxHeart() {
+  for (int x = 0; x < SCREEN_W; x++) {
+    int y = 50 + (int)(sinf(x * 0.5f + gT * 6.0f) * 3);
+    setPixel(x, y, true);
+    setPixel(x, y + 1, true);
   }
-  for (int i = 0; i < 12; i++) setPixel(esp_random() % SCREEN_W, esp_random() % 14, true);
-  (void)dur;
-}
-
-static void fxBars(const char *txt, uint32_t ms, uint16_t dur) {
-  int phase = (int)(ms / 8);
-  for (int x = 0; x < SCREEN_W; x += 8) {
-    int h = (int)((x * 7 + phase * 3) % 32) + 4;
-    fillRect(x, SCREEN_H - h, x + 3, SCREEN_H - 1);
-  }
-  fillRect(0, 0, SCREEN_W - 1, 13);
-  drawCenter(0, txt, 1);
-  (void)dur;
-}
-
-static void fxMatrix(uint32_t ms) {
-  static const char *D = "01";
-  for (int c = 0; c < 16; c++) {
-    int x = c * 8;
-    int head = (int)((ms / 18 + c * 37) % 72) - 8;
-    for (int k = 0; k < 5; k++) {
-      int y = head - k * 12;
-      if (y < -12 || y > SCREEN_H) continue;
-      char s[2] = { D[(c + k) & 1], 0 };
-      drawText(x, y, s);
-    }
+  for (int i = 0; i < 60; i++) {
+    float t = i * 0.105f;
+    float hx = 14 * powf(sinf(t), 3);
+    float hy = -(12 * cosf(t) - 4.5f * cosf(2 * t) - 2 * cosf(3 * t) - cosf(4 * t));
+    fillRect(64 + (int)hx, 20 + (int)(hy * 0.75f), 65 + (int)hx, 21 + (int)(hy * 0.75f));
   }
 }
 
-static void fxInvert(const char *txt) {
-  fillBuf(0xFF);
-  int w = textWidth(txt, 2);
-  drawTextMode((SCREEN_W - w) / 2, 18, txt, 2, false);
-  drawRect(2, 2, SCREEN_W - 3, SCREEN_H - 3);
-}
-
-static void fxScroll(const char *txt, uint32_t ms, uint16_t dur) {
-  int w = textWidth(txt, 1);
-  int span = w + SCREEN_W;
-  int x = SCREEN_W - (int)((uint64_t)span * ms / (dur ? dur : 1));
-  drawText(x, 24, txt);
-}
-
-static void fxCount(uint32_t ms, uint32_t t) {
-  char b[16];
-  snprintf(b, sizeof(b), "%05u", (unsigned)(t / 100));
-  drawCenter(18, b, 2);
-  char b2[16];
-  snprintf(b2, sizeof(b2), "%02u%%", (unsigned)(100.0 * t / (gTotalMs ? gTotalMs : 1)));
-  drawCenter(48, b2, 1);
-  (void)ms;
-}
-
-/* 播放一帧：t 为整段时间轴上的毫秒数 */
-static void playFrame(uint32_t t) {
-  if (gTotalMs == 0) return;
-  uint32_t tt = t % gTotalMs;
-  uint32_t acc = 0;
-  for (uint32_t i = 0; i < CUE_N; i++) {
-    if (tt < acc + CUES[i].dur) {
-      uint32_t local = tt - acc;
-      clearBuf();
-      switch (CUES[i].fx) {
-        case FX_TITLE:  fxTitle(CUES[i].txt, local, CUES[i].dur); break;
-        case FX_TYPE:   fxType(CUES[i].txt, local, CUES[i].dur); break;
-        case FX_BIG:    fxBig(CUES[i].txt, local, CUES[i].dur); break;
-        case FX_GLITCH: fxGlitch(CUES[i].txt, local, CUES[i].dur); break;
-        case FX_BARS:   fxBars(CUES[i].txt, local, CUES[i].dur); break;
-        case FX_MATRIX: fxMatrix(local); break;
-        case FX_INVERT: fxInvert(CUES[i].txt); break;
-        case FX_SCROLL: fxScroll(CUES[i].txt, local, CUES[i].dur); break;
-        default:        fxCount(local, t); break;
-      }
-      /* 底部进度条 */
-      int pw = (int)((uint64_t)SCREEN_W * tt / gTotalMs);
-      if (pw > 0) hline(0, pw - 1, SCREEN_H - 1);
-      return;
-    }
-    acc += CUES[i].dur;
+/* 15 地球：粗圆 + 赤道纬线 + 两条经线 */
+static void fxWorld() {
+  circle(64, 30, 24, 2);
+  hline(41, 87, 30);
+  for (int k = -1; k <= 1; k += 2) {
+    int y = 30 + k * 12;
+    int w = (int)sqrtf(24.0f * 24.0f - (float)((y - 30) * (y - 30)));
+    hline(64 - w, 64 + w, y);
+  }
+  float rot = gT * 1.6f;
+  for (int k = 0; k < 2; k++) {
+    int x = 64 + (int)(sinf(rot + k * 3.1416f) * 24);
+    int h = (int)sqrtf(fmaxf(0, 576 - (x - 64) * (x - 64)));
+    vline(30 - h, 30 + h, x);
+    vline(30 - h, 30 + h, x + 1);
   }
 }
 
-/* ==================== 待机画面 ==================== */
-static void idleFrame(uint32_t t) {
+/* 16 收尾：大字 + 短促反白 */
+static void fxLogo(float p) {
+  bool inv = (p > 0.85f) && ((int)(gT * 6) & 1);
+  if (inv) fillBuf(0xFF);
+  int w = textWidth("me;", 2);
+  drawTextMode((SCREEN_W - w) / 2, 18, "me;", 2, !inv);
+  if (!inv) drawRect(4, 4, SCREEN_W - 5, SCREEN_H - 5);
+}
+
+/* ==================== 分段（时间取自公开分析数据） ==================== */
+typedef struct { float start; uint8_t fx; uint8_t ch; } Section;
+static const Section SEC[] = {
+  {   0.00f, FX_TERM,      1 },
+  {  15.07f, FX_LATTICE,   2 },
+  {  29.84f, FX_RIPPLE,    3 },
+  {  44.61f, FX_TUNNEL,    4 },
+  {  59.38f, FX_NET,       5 },
+  {  74.14f, FX_GLYPH,     6 },
+  {  88.91f, FX_FLIPDOT,   7 },
+  { 103.68f, FX_SPECTRUM,  8 },
+  { 118.45f, FX_SHARDS,    9 },
+  { 125.84f, FX_CORRUPT,  10 },
+  { 133.22f, FX_PIXELSORT,11 },
+  { 147.99f, FX_CODE,     12 },
+  { 162.76f, FX_CHANT,    13 },
+  { 177.53f, FX_HEART,    14 },
+  { 192.30f, FX_WORLD,    15 },
+  { 207.07f, FX_LOGO,     16 },
+};
+#define SEC_N (sizeof(SEC) / sizeof(SEC[0]))
+#define TOTAL_S 211.9f
+
+static void playFrame(float t) {
+  gT = t;
   clearBuf();
-  drawCenter(10, "world.execute", 1);
-  drawCenter(26, "(me);", 1);
-  hline(26, 101, 42);
-  if (((t / 500) & 1) == 0) drawCenter(46, "按 # 开始", 1);
+
+  int i = 0;
+  while (i + 1 < (int)SEC_N && t >= SEC[i + 1].start) i++;
+  float t0 = SEC[i].start;
+  float t1 = (i + 1 < (int)SEC_N) ? SEC[i + 1].start : TOTAL_S;
+  float p = (t1 > t0) ? (t - t0) / (t1 - t0) : 0;
+
+  switch (SEC[i].fx) {
+    case FX_TERM:      fxTerm(p); break;
+    case FX_LATTICE:   fxLattice(p); break;
+    case FX_RIPPLE:    fxRipple(p); break;
+    case FX_TUNNEL:    fxTunnel(p); break;
+    case FX_NET:       fxNet(p); break;
+    case FX_GLYPH:     fxGlyph(p); break;
+    case FX_FLIPDOT:   fxFlipdot(p); break;
+    case FX_SPECTRUM:  fxSpectrum(); break;
+    case FX_SHARDS:    fxShards(p); break;
+    case FX_CORRUPT:   fxCorrupt(); break;
+    case FX_PIXELSORT: fxPixelsort(p); break;
+    case FX_CODE:      fxCode(p); break;
+    case FX_CHANT:     fxChant(p); break;
+    case FX_HEART:     fxHeart(); break;
+    case FX_WORLD:     fxWorld(); break;
+    default:           fxLogo(p); break;
+  }
+
+  /* 章节号只在开场 2 秒出现，避免固定位置长亮（烧屏） */
+  if (t - t0 < 2.0f) {
+    char b[4];
+    snprintf(b, sizeof(b), "%02u", (unsigned)SEC[i].ch);
+    drawText(2, 2, b);
+  }
+}
+
+/* ==================== 待机 ==================== */
+static void idleFrame(uint32_t ms) {
+  clearBuf();
+  bigText(8, "me;");
+  smallText(36, "world.execute");
+  if (((ms / 500) & 1) == 0) smallText(50, "# 播放");
   flush();
 }
 
 /* ==================== 按键 ==================== */
-static bool gHashPrev = false, gStarPrev = false;
-
+static bool gPrevH = false, gPrevS = false;
 static bool pressed(uint8_t pin, bool &prev) {
   bool cur = (digitalRead(pin) == LOW);
   bool hit = cur && !prev;
@@ -429,22 +530,18 @@ static bool pressed(uint8_t pin, bool &prev) {
   return hit;
 }
 
-/* ==================== setup/loop ==================== */
-static bool gPlaying = false;
+static bool     gPlaying = false;
 static uint32_t gStartMs = 0;
 
 void setup() {
   pinMode(KEY_HASH, INPUT_PULLUP);
   pinMode(KEY_STAR, INPUT_PULLUP);
-
   Wire.begin(OLED_SDA, OLED_SCL, 100000);
   Wire.setClock(400000);
   Wire.beginTransmission(0x3D);
   if (Wire.endTransmission() == 0) gOledAddr = 0x3D;
   oledInit();
-
   fontMount();
-  computeTotal();
   gStartMs = millis();
 }
 
@@ -452,22 +549,18 @@ void loop() {
   static uint32_t last = 0;
   uint32_t now = millis();
 
-  if (pressed(KEY_HASH, gHashPrev)) {
-    gPlaying = true;
-    gStartMs = now;            /* 每次按 # 都从头播 */
-  }
-  if (pressed(KEY_STAR, gStarPrev)) gPlaying = false;
+  if (pressed(KEY_HASH, gPrevH)) { gPlaying = true; gStartMs = now; }
+  if (pressed(KEY_STAR, gPrevS)) { gPlaying = false; }
+
+  if (now - last < FRAME_MS) return;
+  last = now;
 
   if (gPlaying) {
-    if (now - last >= FRAME_MS) {
-      last = now;
-      playFrame(now - gStartMs);
-      flush();
-    }
+    float t = (now - gStartMs) / 1000.0f;
+    if (t >= TOTAL_S) { gStartMs = now; t = 0; }
+    playFrame(t);
+    flush();
   } else {
-    if (now - last >= FRAME_MS) {
-      last = now;
-      idleFrame(now - gStartMs);
-    }
+    idleFrame(now);
   }
 }
