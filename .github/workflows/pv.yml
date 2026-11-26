@@ -1,0 +1,95 @@
+name: pv
+
+on:
+  # 仅手动触发：Actions 页面 "Run workflow"，或 gh workflow run pv
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup arduino-cli
+        run: |
+          curl -fsSL -o /tmp/acli.tar.gz             "https://github.com/arduino/arduino-cli/releases/download/v1.6.0/arduino-cli_1.6.0_Linux_64bit.tar.gz"
+          sudo tar -xzf /tmp/acli.tar.gz -C /usr/local/bin arduino-cli
+          arduino-cli version
+
+      - name: Cache core and libraries
+        id: cache-core
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15/packages
+            ~/Arduino/libraries
+          key: esp32-3.3.10-arduinojson7.4.3-nimble2.5.2-v1
+
+      - name: Install ESP32 core
+        if: steps.cache-core.outputs.cache-hit != 'true'
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.10
+
+      - name: Config fallback
+        if: steps.cache-core.outputs.cache-hit == 'true'
+        run: arduino-cli config init --overwrite
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-pv-${ github.sha }
+          restore-keys: |
+            ccache-
+
+      - name: Install ccache
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+          ccache -V | head -1
+
+      - name: Patch platform.txt for ccache
+        run: python3 tools/patch_ccache.py
+
+      # pv/ 是独立 sketch，字库声明按构建期复制一份（见 .gitignore）
+      - name: Sync font header
+        run: cp src/font_wqy14.h pv/font_wqy14.h
+
+      - name: Compile
+        run: |
+          ccache -z
+          arduino-cli compile -j "$(nproc)" --build-path .build-pv \
+            --build-property "upload.maximum_size=1638400" \
+            --build-property "compiler.cache_cmd=ccache" \
+            --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc" pv
+          ccache -s
+          ls -l .build-pv/pv.ino.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pv
+          path: .build-pv/pv.ino.bin
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          tag_name: pv-build-${ github.run_number }
+          name: pv-build-${ github.run_number }
+          body: |
+            world.execute(me); 风格的字幕 PV（无音乐）
+            - 刷写地址 0x10000（只换 app，不动字库/书库/NVS）
+            - 上电进待机，按 # 开始播放，按 * 回待机
+          files: .build-pv/pv.ino.bin

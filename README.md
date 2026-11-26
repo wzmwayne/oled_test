@@ -297,6 +297,28 @@ python3 tools/genfont_c.py --chars "测试屏幕"
 固件启动时校验 `FNT2` 头、层数与各段长度；不匹配就关掉字库（不出字）并写日志，
 不会再把 0xFFFF 当字宽画出满屏白块。
 
+## 字幕 PV 程序（pv/）
+
+独立的小程序：上电直接进 PV 待机画面，按 `#` 开始播放，按 `*` 回待机。
+**纯视觉、无音乐**，沿用主固件的分区表和字库。
+
+| 项 | 说明 |
+|---|---|
+| 刷写 | `esptool --chip esp32c3 -p /dev/ttyACM0 -b 921600 write_flash 0x10000 oled-pv-<tag>.bin` |
+| 占用 | 只用 app0（0x10000）；字库从 0x1A0000 mmap |
+| 数据 | **完全不碰** NVS 与 LittleFS，刷它不会丢书和配置 |
+| 按键 | `#` 从头播放，`*` 回待机 |
+| 构建 | GitHub Actions 的 `pv` workflow（手动触发）→ `./getpv.sh` 拉到 `/sdcard/Download` |
+
+时间轴在 [pv/pv.ino](pv/pv.ino) 的 `CUES[]` 表里，每行是 `{时长ms, 效果, 文字}`，
+效果有 `FX_TITLE`（标题+光标）、`FX_TYPE`（打字机）、`FX_BIG`（2 倍字反白）、
+`FX_GLITCH`（行错位+噪点）、`FX_BARS`（竖条扫过）、`FX_MATRIX`（0/1 雨）、
+`FX_INVERT`（反白）、`FX_SCROLL`（横滚）、`FX_COUNT`（帧计数）。
+
+> 表里只放标题与抽象字形，不含歌词文本；要放自己的字幕，改这张表重新编译即可。
+
+从 PV 回到主固件：`./getfw.sh` 然后刷 `0x10000`（分区表没动，书库/配置都还在）。
+
 ## 故障判读
 
 | 现象 | 结论 |
