@@ -210,7 +210,8 @@ static void oledCmd(uint8_t c) { i2cWrite(gOledAddr, 0x00, &c, 1); }
  * 以前每个命令字节各走一次 beginTransmission/endTransmission，
  * 光设置页/列窗口就要 6 次事务，开销比数据本身还大。 */
 static void oledCmdSeq(const uint8_t *c, size_t n) { i2cWrite(gOledAddr, 0x00, c, n); }
-static void clearBuf() { memset(gBuf, 0, sizeof(gBuf)); }
+static bool gRowBusy = false;    /* 本帧有行在滚（含起滚前的停顿），clearBuf 每帧清零 */
+static void clearBuf() { memset(gBuf, 0, sizeof(gBuf)); gRowBusy = false; }
 
 static void setPixel(int x, int y, bool on) {
   if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
@@ -833,66 +834,34 @@ static void wakeUp(WakeSource src) {
   }
 }
 
-/* ---------------- 走马灯 ----------------
- * 主页课表那行经常超过 128px（"上课：正在上 高等数学，还剩 23分，下节 大学英语，
- * 1小时20分后 午餐 12:10"），超过就横向滚动：每轮开头静止 1.5 秒，
- * 之后每 45ms 走 2px，滚到底再停 1.5 秒重来；放得下就居中静态显示。 */
-/* 文案指纹（FNV-1a）：只存指纹不存副本。
- * 主页那行 UTF-8 一个字 3 字节，一屏课表状态轻松 100+ 字节；
- * 以前用 64 字节缓冲存副本，长句被截断后 strcmp 永远不相等，
- * 每帧都被当成"文案变了"重置偏移——这就是主页课表栏不滚的原因。 */
-static uint32_t gMqKey  = 0;
-static int16_t  gMqOff  = 0;
-static uint32_t gMqNext = 0;
-static bool     gMqOn   = false;  /* 文案超屏，处于滚动状态 */
+/* ---------------- 通用行 / 列表 ----------------
+ * 全机只有这一套行渲染：放得下就静止，放不下就滚动（1.5s 停顿 / 45ms 一步 /
+ * 2px），选中行整行反白，right 是右侧固定列（如百分比），不会被滚动内容盖住。
+ * 以前主页、书目、目录、课表各有一份走马灯，改一处漏三处。 */
+static uint32_t gRowKey  = 0;
+static int16_t  gRowOff  = 0;
+static uint32_t gRowNext = 0;
 
 #define MQ_HOLD_MS 1500
+#define MQ_STEP_MS 45
 
 static uint32_t mqKey(const char *s) {
   uint32_t h = 2166136261u;
   for (const uint8_t *p = (const uint8_t *)s; *p; p++) { h ^= *p; h *= 16777619u; }
-  return h ? h : 1u;                       /* 0 留给"强制重排" */
+  return h ? h : 1u;                 /* 0 留给"强制重排" */
 }
 
-/* 回到主页 / 亮屏 / 滚完一轮时，先静止 1.5 秒再滚 */
+/* 定义在 fitText 之后，这里先声明（主页/课表在上面就要用） */
+static void uiRow(int y, const char *text, bool sel, const char *right, bool scroll);
+typedef void (*UiItemFn)(int i, char *buf, size_t n, char *right, size_t rn);
+static void uiList(const char *title, const char *pageRight, int n, int sel,
+                   int visible, int y0, UiItemFn item);
+
+/* 回到主页 / 亮屏时，先让滚动条停 1.5 秒再滚 */
 static void mqHold() {
-  gMqNext = millis() + MQ_HOLD_MS;
-  gMqOff  = 0;
-  gMqKey  = 0;
-}
-
-/* 这一帧是否必须重画走马灯：静止（放得下 / 起滚前的停顿）时返回 false，
- * 主循环据此把主页刷新从 16fps 降到「每秒一次」。 */
-static bool mqWantsFrame() {
-  if (!gMqOn) return false;
-  if (gMqOff == 0 && (int32_t)(millis() - gMqNext) < 0) return false;
-  return true;
-}
-
-static void drawMarquee(int y, const char *s) {
-  int w = textWidthScaled(s, 1);
-  uint32_t k = mqKey(s);
-  if (w <= SCREEN_W) {
-    gMqOn = false;
-    gMqKey = k; gMqOff = 0;
-    drawCenter(y, s);
-    return;
-  }
-  gMqOn = true;
-  if (k != gMqKey) {                      /* 文案变了就从头滚 */
-    gMqKey = k;
-    gMqOff = 0;
-    gMqNext = millis() + MQ_HOLD_MS;
-    drawText(0, y, s);
-    return;
-  }
-  uint32_t now = millis();
-  if ((int32_t)(now - gMqNext) >= 0) {
-    gMqOff += 2;
-    if (gMqOff > w + 20) { gMqOff = 0; gMqNext = now + MQ_HOLD_MS; }
-    else                 { gMqNext = now + 45; }
-  }
-  drawText(-gMqOff, y, s);
+  gRowNext = millis() + MQ_HOLD_MS;
+  gRowOff  = 0;
+  gRowKey  = 0;
 }
 
 static void hhmm(char *buf, size_t n, uint16_t min) {
@@ -914,7 +883,7 @@ static void durText(char *buf, size_t n, int min) {
  * 后面那句（下节 / 下下节）没有对应课程时整段省掉，不显示「无」。
  * 名词用课名，时间统一成人话（"45分" / "1小时20分"）。 */
 static void drawHomeSchedule() {
-  if (!gNowOk) { gMqOn = false; drawCenter(ROW3, "--"); return; }
+  if (!gNowOk) { drawCenter(ROW3, "--"); return; }
 
   char line[160], d1[16], d2[16];
   int  today  = weekdayIso(gNow.year, gNow.month, gNow.day);
@@ -922,7 +891,7 @@ static void drawHomeSchedule() {
 
   int idx[TT_MAX];
   int n = ttDayList(today, idx, TT_MAX);
-  if (n == 0) { drawMarquee(ROW3, "今天没课"); return; }
+  if (n == 0) { uiRow(ROW3, "今天没课", false, nullptr, true); return; }
 
   /* 一次遍历：正在上 / 下节 / 下下节。
    * 事件（start==end）不会"正在上"，只会作为下节/下下节出现。 */
@@ -984,7 +953,7 @@ static void drawHomeSchedule() {
     }
   }
 
-  drawMarquee(ROW3, line);
+  uiRow(ROW3, line, false, nullptr, true);
 }
 
 /* ---------------- 各页面绘制 ---------------- */
@@ -1080,66 +1049,46 @@ static void schFocusNow() {
   gSchSel = n - 1;          /* 今天已经上完，停在最后一节 */
 }
 
-/* 列表行：8:05-9:40 高等数学
- * 128px 里时间要占 63~77px，课名放不下就滚动（见 drawSchRow）。 */
-static uint32_t gSchMqKey  = 0;
-static int      gSchMqOff  = 0;
-static uint32_t gSchMqNext = 0;
-static bool     gSchMqOn   = false;
+/* 课表页：行文字由 itemSch 拼（事件前面加 ·），右侧没有附加列 */
+static const int *gSchIdx = nullptr;      /* 显示行 -> 课程下标 */
 
-static void drawSchRow(int y, const char *s, bool sel);   /* 定义在 fitText 之后 */
+static void itemSch(int i, char *buf, size_t n, char *rt, size_t rn) {
+  (void)rt; (void)rn;
+  const TtCourse *c = (gSchIdx && i < TT_MAX) ? ttGet(gSchIdx[i]) : nullptr;
+  if (!c) return;
+  char t1[8], t2[8];
+  hhmm(t1, sizeof(t1), c->start);
+  if (c->start == c->end) {
+    snprintf(buf, n, "· %s %s", t1, c->name);          /* 事件：单点 */
+  } else {
+    hhmm(t2, sizeof(t2), c->end);
+    snprintf(buf, n, "%s-%s %s", t1, t2, c->name);
+  }
+}
 
 static void drawSchedule() {
   int  idx[TT_MAX];
   int  day = schShowDay();
   int  n   = ttDayList(day, idx, TT_MAX);
-  char buf[64], t1[8], t2[8];
+  char title[64];
 
-  snprintf(buf, sizeof(buf), "课表 %s周%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
-  drawTitleBar(buf);
-
-  if (n == 0) {
-    gSchMqOn = false;                    /* 没课就不需要滚动帧 */
-    drawCenter(ROW2, "这天没有课");
-    return;
-  }
+  snprintf(title, sizeof(title), "课表 %s周%s", (gSchDay == 0) ? "今天·" : "", DAY_CN[day - 1]);
+  if (n == 0) { drawTitleBar(title); drawCenter(ROW2, "这天没有课"); return; }
   if (gSchSel >= n) gSchSel = n - 1;
   if (gSchSel < 0)  gSchSel = 0;
 
-  int first = (gSchSel >= 3) ? gSchSel - 2 : 0;
-  for (int i = 0; i < 3; i++) {
-    int k = first + i;
-    if (k >= n) break;
-    const TtCourse *c = ttGet(idx[k]);
-    hhmm(t1, sizeof(t1), c->start);
-    if (c->start == c->end) {
-      snprintf(buf, sizeof(buf), "· %s %s", t1, c->name);   /* 事件：单点 */
-    } else {
-      hhmm(t2, sizeof(t2), c->end);
-      snprintf(buf, sizeof(buf), "%s-%s %s", t1, t2, c->name);
-    }
-    drawSchRow(ROW1 + i * 16, buf, k == gSchSel);
-  }
-  if (first > 0)     fillRect(124, 2, 127, 5);
-  if (first + 3 < n) fillRect(124, 58, 127, 61);
+  gSchIdx = idx;
+  uiList(title, nullptr, n, gSchSel, 3, ROW1, itemSch);
+  gSchIdx = nullptr;
+}
+
+static void itemMenu(int i, char *buf, size_t n, char *rt, size_t rn) {
+  (void)rt; (void)rn;
+  snprintf(buf, n, "%s", APP_NAME[i]);
 }
 
 static void drawMenu() {
-  int first = (gMenuSel >= 4) ? gMenuSel - 3 : 0;
-  for (int i = 0; i < 4; i++) {
-    int idx = first + i;
-    if (idx >= MENU_COUNT) break;
-    int y = ROW0 + i * 16;
-    if (idx == gMenuSel) {
-      fillRect(0, y, SCREEN_W - 1, y + 14);
-      int x = (SCREEN_W - textWidthScaled(APP_NAME[idx], 1)) / 2;
-      drawTextMode(x, y, APP_NAME[idx], 1, false);
-    } else {
-      drawCenter(y, APP_NAME[idx]);
-    }
-  }
-  if (first > 0) fillRect(124, 2, 127, 5);
-  if (first + 4 < MENU_COUNT) fillRect(124, 58, 127, 61);
+  uiList(nullptr, nullptr, MENU_COUNT, gMenuSel, 4, ROW0, itemMenu);
 }
 
 static void drawIdInput() {
@@ -1251,154 +1200,100 @@ static void fitText(char *dst, size_t dn, const char *src, int maxW) {
   dst[o] = 0;
 }
 
-/* ---------------- 课表列表行 ----------------
- * 课名一长（"8:05-9:40 高等数学（走班）"）就超出 128px，以前直接被屏幕切掉，
- * 看不出后面是什么。选中行改成走马灯，其余行截断加省略号。 */
-static bool schMqActive() { return gSchMqOn; }
+/* ---------------- 通用行渲染的具体实现 ---------------- */
+static void uiRow(int y, const char *text, bool sel, const char *right, bool scroll) {
+  int rw    = (right && *right) ? textWidthScaled(right, 1) : 0;
+  int avail = SCREEN_W - (rw ? rw + 6 : 3);
+  int tw    = textWidthScaled(text, 1);
+  int x     = 2;
+  char cut[96];
+  const char *draw = text;
 
-static void drawSchRow(int y, const char *s, bool sel) {
-  int tw = textWidthScaled(s, 1);
-  uint32_t k = mqKey(s);
+  if (sel) fillRect(0, y, SCREEN_W - 1, y + 14);
 
-  if (!sel) {
-    char cut[64];
-    fitText(cut, sizeof(cut), s, SCREEN_W - 2);
-    drawText(0, y, cut);
-    return;
+  if (scroll && tw > avail) {
+    gRowBusy = true;                       /* 起滚前的停顿也要出帧 */
+    uint32_t now = millis();
+    uint32_t k   = mqKey(text);
+    if (k != gRowKey) { gRowKey = k; gRowOff = 0; gRowNext = now + MQ_HOLD_MS; }
+    if ((int32_t)(now - gRowNext) >= 0) {
+      gRowOff += 2;
+      if (gRowOff > tw - avail + 16) { gRowOff = 0; gRowNext = now + MQ_HOLD_MS; }
+      else                           { gRowNext = now + MQ_STEP_MS; }
+    }
+    x = 2 - gRowOff;
+  } else if (tw > avail) {
+    fitText(cut, sizeof(cut), text, avail); /* 不滚动就截断加省略号 */
+    draw = cut;
   }
 
-  fillRect(0, y, SCREEN_W - 1, y + 14);
-  if (tw <= SCREEN_W - 2) {              /* 放得下：静止反白 */
-    gSchMqOn = false;
-    gSchMqKey = k; gSchMqOff = 0;
-    drawTextMode(0, y, s, 1, false);
-    return;
-  }
+  if (sel) drawTextMode(x, y, draw, 1, false);
+  else     drawText(x, y, draw);
 
-  gSchMqOn = true;
-  uint32_t now = millis();
-  if (k != gSchMqKey) {                  /* 换了课（或换了行）就从头滚 */
-    gSchMqKey = k; gSchMqOff = 0; gSchMqNext = now + 1000;
+  if (rw) {
+    /* 右侧固定列：先把滚过来的字擦掉，再画，保证永远看得见 */
+    if (sel) fillRect(SCREEN_W - rw - 4, y, SCREEN_W - 1, y + 14);
+    if (sel) drawTextMode(SCREEN_W - rw - 2, y, right, 1, false);
+    else     drawText(SCREEN_W - rw - 2, y, right);
   }
-  if ((int32_t)(now - gSchMqNext) >= 0) {
-    gSchMqOff += 2;
-    if (gSchMqOff > tw - (SCREEN_W - 2) + 16) { gSchMqOff = 0; gSchMqNext = now + 1000; }
-    else                                      { gSchMqNext = now + 45; }
-  }
-  drawTextMode(-gSchMqOff, y, s, 1, false);
 }
 
-/* 书目选中行的走马灯状态（只存指纹，书名多长都不怕） */
-static uint32_t gBkMqKey = 0;
-static int      gBkMqOff = 0;
-static uint32_t gBkMqNext = 0;
+/* 列表页：header（可空）+ 若干行 + 上下越界小三角。
+ * item() 负责把第 i 项的文字填进 buf、右侧列填进 rt（可留空）。 */
+static void uiList(const char *title, const char *pageRight, int n, int sel,
+                   int visible, int y0, UiItemFn item) {
+  if (title) {
+    if (pageRight && *pageRight) drawTitleBarRight(title, pageRight);
+    else                         drawTitleBar(title);
+  }
+  int first = (sel >= visible) ? sel - (visible - 1) : 0;
+  char buf[96], rt[16];
+  for (int i = 0; i < visible; i++) {
+    int k = first + i;
+    if (k >= n) break;
+    buf[0] = 0; rt[0] = 0;
+    item(k, buf, sizeof(buf), rt, sizeof(rt));
+    uiRow(y0 + i * 16, buf, k == sel, rt, k == sel);   /* 只有选中行会滚 */
+  }
+  if (first > 0)           fillRect(124, 2, 127, 5);
+  if (first + visible < n) fillRect(124, 58, 127, 61);
+}
+
+static void itemBook(int i, char *buf, size_t n, char *rt, size_t rn) {
+  snprintf(buf, n, "%s", rdBookTitle(i));      /* 优先用 ezzbk 元数据里的书名 */
+  snprintf(rt, rn, "%d%%", rdBookPercent(i));
+}
+
+static void itemToc(int i, char *buf, size_t n, char *rt, size_t rn) {
+  (void)rt; (void)rn;
+  snprintf(buf, n, "%s", rdTocName(i));
+}
 
 static void drawBookList() {
-  drawTitleBar("阅读器");
   int n = rdBookCount();
   if (n == 0) {
+    drawTitleBar("阅读器");
     drawCenter(ROW2, "还没有书");
     drawCenter(ROW3 + 2, "App 上传 ezzbk");
     return;
   }
   if (gRdSel >= n) gRdSel = n - 1;
   if (gRdSel < 0)  gRdSel = 0;
-
-  int first = (gRdSel >= 3) ? gRdSel - 2 : 0;
-  for (int i = 0; i < 3; i++) {
-    int k = first + i;
-    if (k >= n) break;
-    char pct[8], buf[RD_TITLE_MAX + 8];
-    const char *title = rdBookTitle(k);       /* 优先用 ezzbk 元数据里的书名 */
-    snprintf(pct, sizeof(pct), "%d%%", rdBookPercent(k));
-    int pw = textWidthScaled(pct, 1);
-    int y = ROW1 + i * 16;
-    int avail = SCREEN_W - pw - 6;            /* 右边这一段永久留给百分比 */
-
-    if (k == gRdSel) {
-      int tw = textWidthScaled(title, 1);
-      uint32_t kk = mqKey(title);
-      fillRect(0, y, SCREEN_W - 1, y + 14);
-      if (tw <= avail) {
-        gBkMqKey = kk; gBkMqOff = 0;
-        fitText(buf, sizeof(buf), title, avail);
-        drawTextMode(2, y, buf, 1, false);
-      } else {
-        /* 放不下：只在左侧 avail 宽度里滚，百分比固定不动 */
-        uint32_t now = millis();
-        if (kk != gBkMqKey) { gBkMqKey = kk; gBkMqOff = 0; gBkMqNext = now + 1000; }
-        if ((int32_t)(now - gBkMqNext) >= 0) {
-          gBkMqOff += 2;
-          if (gBkMqOff > tw - avail + 16) { gBkMqOff = 0; gBkMqNext = now + 1000; }
-          else                            { gBkMqNext = now + 45; }
-        }
-        drawTextMode(2 - gBkMqOff, y, title, 1, false);
-        /* 把滚到百分比底下的字擦掉，保证百分比始终看得见 */
-        fillRect(SCREEN_W - pw - 4, y, SCREEN_W - 1, y + 14);
-      }
-      drawTextMode(SCREEN_W - pw - 2, y, pct, 1, false);
-    } else {
-      fitText(buf, sizeof(buf), title, avail);
-      drawText(2, y, buf);
-      drawText(SCREEN_W - pw - 2, y, pct);
-    }
-  }
-  if (first > 0)     fillRect(124, 2, 127, 5);
-  if (first + 3 < n) fillRect(124, 58, 127, 61);
+  uiList("阅读器", nullptr, n, gRdSel, 3, ROW1, itemBook);
 }
-
-/* 目录选中行的走马灯状态 */
-static uint32_t gTocMqKey = 0;
-static int      gTocMqOff = 0;
-static uint32_t gTocMqNext = 0;
 
 static void drawToc() {
   char pct[8];
   snprintf(pct, sizeof(pct), "%d%%", rdPercent());
-  drawTitleBarRight("目录", pct);
   int n = rdTocCount();
   if (n == 0) {
+    drawTitleBarRight("目录", pct);
     drawCenter(ROW2, "这本书没有目录");
     return;
   }
   if (gTocSel >= n) gTocSel = n - 1;
   if (gTocSel < 0)  gTocSel = 0;
-
-  int first = (gTocSel >= 3) ? gTocSel - 2 : 0;
-  for (int i = 0; i < 3; i++) {
-    int k = first + i;
-    if (k >= n) break;
-    int y = ROW1 + i * 16;
-    const char *full = rdTocName(k);
-
-    if (k == gTocSel) {
-      /* 选中行（焦点）：放不下就静止 1 秒再横向滚，滚完停 1 秒重来 */
-      int tw = textWidthScaled(full, 1);
-      int x = 2;
-      uint32_t kk = mqKey(full);
-      if (tw > SCREEN_W - 4) {
-        uint32_t now = millis();
-        if (kk != gTocMqKey) { gTocMqKey = kk; gTocMqOff = 0; gTocMqNext = now + 1000; }
-        if ((int32_t)(now - gTocMqNext) >= 0) {
-          gTocMqOff += 2;
-          if (gTocMqOff > tw - (SCREEN_W - 4) + 16) { gTocMqOff = 0; gTocMqNext = now + 1000; }
-          else                                      { gTocMqNext = now + 45; }
-        }
-        x = 2 - gTocMqOff;
-      } else {
-        gTocMqKey = kk;
-        gTocMqOff = 0;
-      }
-      fillRect(0, y, SCREEN_W - 1, y + 14);
-      drawTextMode(x, y, full, 1, false);
-    } else {
-      char buf[RD_TOC_NAME + 8];
-      fitText(buf, sizeof(buf), full, SCREEN_W - 3);
-      drawText(2, y, buf);
-    }
-  }
-  if (first > 0)     fillRect(124, 2, 127, 5);
-  if (first + 3 < n) fillRect(124, 58, 127, 61);
+  uiList("目录", pct, n, gTocSel, 3, ROW1, itemToc);
 }
 
 static void drawReader() {
@@ -1430,16 +1325,6 @@ static void drawToast() {
   drawTextMode(x > 0 ? x : 0, ROW3, gToast, 1, false);
 }
 
-
-/* 菜单项：选中时整行反白 */
-static void drawMenuItem(int y, const char *s, bool sel) {
-  if (sel) {
-    fillRect(0, y, SCREEN_W - 1, y + 14);
-    drawTextMode(2, y, s, 1, false);
-  } else {
-    drawText(2, y, s);
-  }
-}
 
 /* ==================== 导航 ==================== */
 static void goHome() {
@@ -1930,12 +1815,12 @@ void loop() {
       /* !gPrevValid：刚唤醒/刚开机，GDDRAM 里是上一帧，必须整屏重画一次
        * ctxChanged：从菜单/别的应用切回主页，画面上还是旧内容 */
       bool ctxChanged = (gApp != lastAppDrawn || gScr != lastScrDrawn);
-      wantFrame = secChanged || mqWantsFrame() || toastNow || toastPrev
+      wantFrame = secChanged || gRowBusy || toastNow || toastPrev
                   || !gPrevValid || ctxChanged || flashing;
     }
     if (gScr == SCR_APP && (gApp == APP_PRECISE || gApp == APP_STOPWATCH)) interval = 16;
-    if (gScr == SCR_APP && gApp == APP_SCHEDULE && schMqActive()) interval = 60;  /* 课名滚动 */
     if (gScr == SCR_APP && gApp == APP_BTCONF) interval = 30;   /* 加载动画 33fps */
+    if (gRowBusy) interval = 60;                                /* 有行在滚：统一 60ms */
     if (wantFrame && now - lastDraw >= interval) {
       lastDraw = now;
       clearBuf();

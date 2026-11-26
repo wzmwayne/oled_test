@@ -100,6 +100,11 @@ WiFi.setTxPower(WIFI_POWER_8_5dBm);    // = 34，单位 0.25dBm
 ### 菜单（5 项）
 
 `主页 / 精确时钟 / 正计时 / 倒计时 / 课表`，`0`/`1` 移动（长按连发，到顶/到底**循环**），`#` 进入，`*` 返回。
+
+菜单、书目、目录、课表四处列表现在走同一套渲染（`uiRow` / `uiList`）：
+左对齐、选中行反白、放不下就滚动（1.5s 停顿 / 45ms 一步 / 2px）、
+右侧可以挂固定列（书目那里是百分比，滚动时不会被盖住）。
+所以菜单项从居中改成了和其它列表一样的左对齐。
 阅读器与蓝牙配置不在菜单里，靠编号进。
 
 ### 编号输入（主页长按 `#`）
@@ -236,26 +241,36 @@ WiFi.setTxPower(WIFI_POWER_8_5dBm);    // = 34，单位 0.25dBm
 |---|---|---|---|
 | nvs | 0x009000 | 20 KB | 配置、进度、课程缓存 |
 | otadata | 0x00E000 | 8 KB | |
-| app0 | 0x010000 | **1 MB** | 固件（约 748 KB，73%；RAM 21%） |
-| font | 0x110000 | 704 KB | 字库点阵（mmap） |
-| spiffs | 0x1C0000 | 2.18 MB | LittleFS：`/books`、`/tt.json` |
+| app0 | 0x010000 | **1 MB** | 固件（约 740 KB，71%；RAM 21%） |
+| font | 0x110000 | **256 KB** | 字库点阵（mmap，实际 225 KB） |
+| spiffs | 0x150000 | **2.62 MB** | LittleFS：`/books`、`/tt.json` |
 | phy | 0x3EF000 | 4 KB | RF 校准 |
 | coredump | 0x3F0000 | 64 KB | 崩溃现场 |
 
+字库从 704KB 收到 256KB，省下的 448KB 全给了书库（2.18 → 2.62MB）。
+改这张表必须刷整包（`0x0`），旧的分区布局下书库会挂载失败。
+
 ## 字库
 
-`font.bin` 放 font 分区，固件里只有声明（`src/font_wqy14.h`）。共 **21419 个字形**，
-每个 32 字节（16×16，不描边），合计 685408 字节 ≈ 669 KB：
+`font.bin` 放 font 分区，固件里只有声明（`src/font_wqy14.h`）。共 **7211 个字形**，
+每个 32 字节（16×16，不描边），合计 230752 字节 ≈ 225 KB：
 
 - ASCII + Latin-1 补充（U+00A0–U+00FF）
 - 通用标点（U+2000–U+2070）、CJK 标点（U+3000–U+3040）、全角形式（U+FF01–U+FF66）
-- GB2312 一级 + 二级汉字，以及 U+4E00–U+9FFF 全部 CJK
+- **GB2312 一级 + 二级汉字（6763 个）**
+- 语料统计出的高频字（与前一项取并集），见下面的 `tools/freq_chars.py`
+
+不再收录 U+4E00–U+9FFF 全量：那样要 685 KB，占掉整个书库的空间。
+代价是生僻字（人名、古籍用字）会显示成空心方框——正文常用字覆盖 99.9%，
+固件自己的界面文案 100% 覆盖（生成时会对照源码核对）。
 
 重新生成（生成完要刷整包）：
 
 ```bash
-python3 tools/genfont_c.py              # 默认常用集
-python3 tools/genfont_c.py --full       # 全 CJK
+python3 tools/freq_chars.py 语料.txt -o freq.txt   # 统计字频（也吃 .ezzbk）
+python3 tools/genfont_c.py --freq freq.txt --top 6000   # 符号 + GB2312 + 高频字
+python3 tools/genfont_c.py              # 只有符号 + GB2312
+python3 tools/genfont_c.py --full       # 恢复全 CJK（需要 704KB 分区）
 python3 tools/genfont_c.py --chars "测试屏幕"
 ```
 

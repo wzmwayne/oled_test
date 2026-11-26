@@ -1,12 +1,13 @@
-# 4MB flash 重新分配：应用区只用得到 0.8MB，多出来的全给字库和书库
-#   app0   2MB  -> 1MB    （当前固件 752KB，留 272KB 余量）
-#   font   256KB -> 704KB （全 CJK 21419 字形，669KB）
-#   spiffs 1.62MB -> 2.18MB
+# 4MB flash 分区（app0 1MB / font 256KB / 书库 2.62MB）
+#   app0   1MB    —— 当前固件约 750KB，留 300KB 余量
+#   font   256KB  —— 符号 + GB2312 + 语料高频字，7211 字形共 225KB
+#   spiffs 2.62MB —— 书库（/books）+ 课表（/tt.json）
+# 改这张表必须刷整包（0x0），否则分区对不上会 mount 失败
 # name,     type, subtype,  offset,     size
 nvs,        data, nvs,      0x9000,     0x5000
 otadata,    data, ota,      0xe000,     0x2000
 app0,       app,  ota_0,    0x10000,    0x100000
-font,       data, 0x40,     0x110000,   0xB0000
-spiffs,     data, spiffs,   0x1C0000,   0x22F000
+font,       data, 0x40,     0x110000,   0x40000
+spiffs,     data, spiffs,   0x150000,   0x29F000
 phy,        data, phy,      0x3EF000,   0x1000
 coredump,   data, coredump, 0x3F0000,   0x10000

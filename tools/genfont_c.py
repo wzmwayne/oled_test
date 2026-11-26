@@ -17,9 +17,12 @@
   SIZE=14  ROWS=14  BASELINE=12  PAD=3  阈值>96
 
 用法:
-  python3 genfont_c.py                  # 默认全量
-  python3 genfont_c.py --full           # 再加 CJK 4E00-9FFF
-  python3 genfont_c.py --chars "测试"    # 只留指定汉字
+  python3 genfont_c.py                       # GB2312 一二级 + 符号
+  python3 genfont_c.py --full                # CJK 4E00-9FFF 全量
+  python3 genfont_c.py --chars "测试"         # 只留指定汉字
+  python3 genfont_c.py --freq freq.txt --top 6000
+                                             # 符号 + GB2312 + 语料前 N 高频字
+  语料字频用 tools/freq_chars.py 从小说/项目文本里统计，结果一行一个频率降序。
 """
 import argparse
 import os
@@ -100,6 +103,16 @@ def build_charset(args):
         cs |= gb2312_level1() | gb2312_level2()
     else:
         cs |= gb2312_level1() | gb2312_level2()
+
+    # --freq：语料字频表（每行一个字，按频率降序），取前 --top 个并进字集。
+    # 和 GB2312 取并集：常用字覆盖日常阅读，GB2312 兜住语料里没出现的常用字。
+    if args.freq:
+        with open(args.freq, encoding="utf-8") as f:
+            freq = [ln.strip() for ln in f if ln.strip()]
+        top = args.top if args.top > 0 else len(freq)
+        for ch in freq[:top]:
+            cs.add(ord(ch[0]))
+        print("字频表 %s：共 %d 字，取前 %d" % (args.freq, len(freq), min(top, len(freq))))
     return sorted(cs)
 
 
@@ -107,6 +120,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--chars", default="")
+    ap.add_argument("--freq", default="")
+    ap.add_argument("--top", type=int, default=0)
     ap.add_argument("--font", default=DEFAULT_FONT)
     ap.add_argument("-o", "--out", default=os.path.join(os.path.dirname(HERE), "font.bin"))
     ap.add_argument("--header", default=os.path.join(os.path.dirname(HERE), "src", "font_wqy14.h"))
